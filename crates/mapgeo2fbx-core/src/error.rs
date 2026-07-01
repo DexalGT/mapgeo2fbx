@@ -31,6 +31,29 @@ pub enum Error {
     #[error("model {model} references missing index buffer id {id}")]
     MissingIndexBuffer { model: String, id: i32 },
 
+    #[error("model {model} submesh index range [{start}..{end}) exceeds index buffer length {buffer_len}")]
+    SubmeshIndexOutOfRange {
+        model: String,
+        start: usize,
+        end: usize,
+        buffer_len: usize,
+    },
+
+    #[error("model {model} vertex buffer too short: needed {needed} bytes at offset {offset}, buffer is {buffer_len} bytes")]
+    VertexBufferTooShort {
+        model: String,
+        offset: usize,
+        needed: usize,
+        buffer_len: usize,
+    },
+
+    #[error("mesh {mesh} submesh references vertex index {index} but mesh has only {vertex_count} vertices")]
+    VertexIndexOutOfRange {
+        mesh: String,
+        index: u32,
+        vertex_count: usize,
+    },
+
     #[error("failed to write fbx file {path}: {source}")]
     FbxWrite {
         path: PathBuf,

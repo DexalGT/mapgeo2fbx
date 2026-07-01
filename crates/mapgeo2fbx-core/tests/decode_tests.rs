@@ -1,4 +1,5 @@
 use mapgeo2fbx_core::decode::decode_geometry;
+use mapgeo2fbx_core::Error;
 use ritoshark::mapgeo::{
     AssetChannel, ElementFormat, ElementName, IndexBuffer, MapGeometry, MapModel, Submesh,
     VertexBuffer, VertexDescription, VertexElement, VertexUsage,
@@ -109,4 +110,52 @@ fn decodes_one_triangle_with_material() {
     assert_eq!(mesh.submeshes.len(), 1);
     assert_eq!(mesh.submeshes[0].name, "Materials/Grass");
     assert_eq!(mesh.submeshes[0].triangle_indices, vec![[0, 1, 2]]);
+}
+
+#[test]
+fn submesh_index_range_beyond_index_buffer_returns_error_not_panic() {
+    let mut geo = one_triangle_geometry();
+    // Corrupt the submesh's index range so it reaches past the 3-entry index buffer built by
+    // one_triangle_geometry(). This mirrors a malformed/malicious .mapgeo file and must produce
+    // a proper Err rather than panicking on the slice index.
+    geo.models[0].submeshes[0].index_start = 0;
+    geo.models[0].submeshes[0].index_count = 100;
+
+    let err = decode_geometry(&geo).expect_err("out-of-range submesh index should error");
+    match err {
+        Error::SubmeshIndexOutOfRange {
+            model,
+            start,
+            end,
+            buffer_len,
+        } => {
+            assert_eq!(model, "MapGeo_Instance_0");
+            assert_eq!(start, 0);
+            assert_eq!(end, 100);
+            assert_eq!(buffer_len, 3);
+        }
+        other => panic!("expected SubmeshIndexOutOfRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn truncated_vertex_buffer_returns_error_not_panic() {
+    let mut geo = one_triangle_geometry();
+    // Truncate the vertex buffer so the last vertex's Texcoord0 element reads past the end of
+    // the data. This mirrors a corrupt/truncated .mapgeo file and must produce a proper Err
+    // rather than panicking on the slice index.
+    geo.vertex_buffers[0].data.truncate(70);
+
+    let err = decode_geometry(&geo).expect_err("truncated vertex buffer should error");
+    match err {
+        Error::VertexBufferTooShort {
+            model,
+            buffer_len,
+            ..
+        } => {
+            assert_eq!(model, "MapGeo_Instance_0");
+            assert_eq!(buffer_len, 70);
+        }
+        other => panic!("expected VertexBufferTooShort, got {other:?}"),
+    }
 }

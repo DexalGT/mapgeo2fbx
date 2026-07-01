@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use crate::decode::DecodedMesh;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Writes an ASCII FBX 7.4 scene containing one Model+Geometry pair per input mesh, with
 /// per-submesh material assignment via a `ByPolygon`/`IndexToDirect` `LayerElementMaterial`.
@@ -203,7 +203,11 @@ fn write_geometry<W: Write>(
     for submesh in &mesh.submeshes {
         for tri in &submesh.triangle_indices {
             for &vi in tri {
-                let v = &mesh.vertices[vi as usize];
+                let v = mesh.vertices.get(vi as usize).ok_or_else(|| Error::VertexIndexOutOfRange {
+                    mesh: mesh.name.clone(),
+                    index: vi,
+                    vertex_count: mesh.vertices.len(),
+                })?;
                 normal_floats.push(format_f32(v.normal.x));
                 normal_floats.push(format_f32(v.normal.y));
                 normal_floats.push(format_f32(v.normal.z));

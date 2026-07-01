@@ -1,5 +1,6 @@
 use mapgeo2fbx_core::decode::{DecodedMesh, DecodedSubmesh, DecodedVertex};
 use mapgeo2fbx_core::fbx::write_fbx;
+use mapgeo2fbx_core::Error;
 use ritoshark::math::{Vec2, Vec3};
 
 fn quad_mesh() -> DecodedMesh {
@@ -48,4 +49,29 @@ fn writes_expected_ascii_for_single_triangle() {
     assert!(text.contains(r#"C: "OO",1000001,1000000"#));
     assert!(text.contains(r#"C: "OO",1000000,0"#));
     assert!(text.contains(r#"C: "OO",1000002,1000000"#));
+}
+
+#[test]
+fn out_of_range_vertex_index_returns_error_not_panic() {
+    let mut mesh = quad_mesh();
+    // Corrupt a triangle index so it points past the 3-vertex mesh built by quad_mesh(). This
+    // mirrors a corrupt submesh from a malformed .mapgeo file and must produce a proper Err
+    // rather than panicking on the slice index.
+    mesh.submeshes[0].triangle_indices[0] = [0, 1, 99];
+
+    let meshes = vec![mesh];
+    let mut buf = Vec::new();
+    let err = write_fbx(&mut buf, &meshes).expect_err("out-of-range vertex index should error");
+    match err {
+        Error::VertexIndexOutOfRange {
+            mesh,
+            index,
+            vertex_count,
+        } => {
+            assert_eq!(mesh, "MapGeo_Instance_0");
+            assert_eq!(index, 99);
+            assert_eq!(vertex_count, 3);
+        }
+        other => panic!("expected VertexIndexOutOfRange, got {other:?}"),
+    }
 }

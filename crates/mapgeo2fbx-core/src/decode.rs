@@ -71,17 +71,26 @@ fn decode_model(geo: &MapGeometry, model: &MapModel) -> Result<DecodedMesh> {
         .map(|sm| {
             let start = sm.index_start as usize;
             let count = sm.index_count as usize;
-            let indices = &index_buffer.indices[start..start + count];
+            let end = start
+                .checked_add(count)
+                .filter(|&end| end <= index_buffer.indices.len())
+                .ok_or_else(|| Error::SubmeshIndexOutOfRange {
+                    model: model.name.clone(),
+                    start,
+                    end: start.saturating_add(count),
+                    buffer_len: index_buffer.indices.len(),
+                })?;
+            let indices = &index_buffer.indices[start..end];
             let triangle_indices = indices
                 .chunks_exact(3)
                 .map(|tri| [tri[0] as u32, tri[1] as u32, tri[2] as u32])
                 .collect();
-            DecodedSubmesh {
+            Ok(DecodedSubmesh {
                 name: sm.name.clone(),
                 triangle_indices,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(DecodedMesh {
         name: model.name.clone(),
@@ -107,6 +116,14 @@ fn decode_vertices(
 
         for element in &description.elements {
             let size = element.format.byte_size();
+            if offset + size > data.len() {
+                return Err(Error::VertexBufferTooShort {
+                    model: model.name.clone(),
+                    offset,
+                    needed: size,
+                    buffer_len: data.len(),
+                });
+            }
             match element.name {
                 ElementName::Position => {
                     position = read_vec3(data, offset, element.format)?;

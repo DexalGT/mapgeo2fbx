@@ -30,6 +30,10 @@ Run `mapgeo2fbx --help` for the full flag list.
 - Static geometry only — `.mapgeo` has no skeleton/animation data (that's a different format
   used by character skins).
 - ASCII FBX 7.4 output only.
+- Currently decodes Position/Normal/UV0 channels stored as 32-bit floats (`XyzFloat32`/
+  `XyFloat32`). Some real `.mapgeo` files use packed integer vertex formats for these channels,
+  which aren't decoded yet — such files will fail with an `UnsupportedVertexFormat` error rather
+  than converting.
 
 ## Building
 
