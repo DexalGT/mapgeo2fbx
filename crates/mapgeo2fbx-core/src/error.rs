@@ -37,6 +37,12 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("i/o error: {source}")]
+    Write {
+        #[from]
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

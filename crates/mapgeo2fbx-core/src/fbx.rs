@@ -1,23 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 
 use crate::decode::DecodedMesh;
-use crate::error::{Error, Result};
-
-// `write_fbx` writes to a generic `W: Write` (an in-memory buffer in tests, a file in the CLI)
-// with no file path available at this layer, so a failing `writeln!` here can't be attributed
-// to a path the way `Error::FbxWrite` expects. The CLI (Task 5) wraps its own file-open/create
-// step with a real path separately; this conversion only covers write failures against the
-// writer itself, where no path is known.
-impl From<std::io::Error> for Error {
-    fn from(source: std::io::Error) -> Self {
-        Error::FbxWrite {
-            path: PathBuf::new(),
-            source,
-        }
-    }
-}
+use crate::error::Result;
 
 /// Writes an ASCII FBX 7.4 scene containing one Model+Geometry pair per input mesh, with
 /// per-submesh material assignment via a `ByPolygon`/`IndexToDirect` `LayerElementMaterial`.
