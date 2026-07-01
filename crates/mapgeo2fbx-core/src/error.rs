@@ -25,6 +25,9 @@ pub enum Error {
     #[error("model {model} references missing vertex buffer id {id}")]
     MissingVertexBuffer { model: String, id: i32 },
 
+    #[error("model {model} references missing vertex description id {id}")]
+    MissingVertexDescription { model: String, id: i32 },
+
     #[error("model {model} references missing index buffer id {id}")]
     MissingIndexBuffer { model: String, id: i32 },
 

@@ -49,7 +49,7 @@ fn decode_model(geo: &MapGeometry, model: &MapModel) -> Result<DecodedMesh> {
     let description = geo
         .vertex_descriptions
         .get(model.vertex_description_id as usize)
-        .ok_or_else(|| Error::MissingVertexBuffer {
+        .ok_or_else(|| Error::MissingVertexDescription {
             model: model.name.clone(),
             id: model.vertex_description_id as i32,
         })?;
@@ -64,7 +64,7 @@ fn decode_model(geo: &MapGeometry, model: &MapModel) -> Result<DecodedMesh> {
 
     let vertices = decode_vertices(model, description, &vertex_buffer.data)?;
 
-    // Global index buffer -> local (per-model) vertex indices, offset by min_vertex per submesh.
+    // Index buffer stores absolute/global vertex indices; no per-submesh offset needed.
     let submeshes = model
         .submeshes
         .iter()
