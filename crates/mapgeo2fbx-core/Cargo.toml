@@ -1,0 +1,10 @@
+[package]
+name = "mapgeo2fbx-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ritoshark = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+ritoshark = { git = "https://github.com/RitoShark/RitoShark-Crates", rev = "d6af5ac", features = ["mapgeo"] }
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+colored = "2.0"
+indicatif = "0.17"
+rayon = "1.10"
+walkdir = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
