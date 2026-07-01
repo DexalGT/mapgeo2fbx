@@ -1,0 +1,28 @@
+[package]
+name = "mapgeo2fbx-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mapgeo2fbx"
+path = "src/main.rs"
+
+[dependencies]
+mapgeo2fbx-core = { path = "../mapgeo2fbx-core" }
+ritoshark = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+colored = { workspace = true }
+indicatif = { workspace = true }
+rayon = { workspace = true }
+walkdir = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
