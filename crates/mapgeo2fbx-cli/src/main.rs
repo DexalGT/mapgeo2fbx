@@ -1,39 +1,109 @@
 mod args;
 mod banner;
 mod batch;
+mod interactive;
 mod logging;
 mod ui;
 
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
-use args::Cli;
+use args::{Cli, LogLevel};
 use clap::Parser;
 use colored::Colorize;
 use mapgeo2fbx_core::info::FileInfo;
 
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
-    let cli = Cli::parse_from(raw);
+    let mode = detect_entry_mode(&raw);
 
-    logging::init(cli.log_level, cli.json);
-    banner::print();
+    let result = match mode {
+        EntryMode::Interactive => {
+            logging::init(LogLevel::Normal, false);
+            let r = interactive::run();
+            if let Err(ref e) = r {
+                eprintln!("{} {e:#}", "error:".bright_red().bold());
+            }
+            if r.is_err() {
+                std::process::exit(1);
+            }
+            return;
+        }
+        EntryMode::DragDrop(path) => {
+            logging::init(LogLevel::Normal, false);
+            banner::print();
+            let cli = Cli {
+                input: path,
+                output: None,
+                info_only: false,
+                verbose: false,
+                json: false,
+                log_level: LogLevel::Normal,
+                no_pause: false,
+            };
+            run(&cli)
+        }
+        EntryMode::Flagged => {
+            let cli = Cli::parse_from(&raw);
+            logging::init(cli.log_level, cli.json);
+            banner::print();
+            let r = run(&cli);
+            let no_pause = cli.no_pause || cli.json;
+            if let Err(ref e) = r {
+                eprintln!("{} {e:#}", "error:".bright_red().bold());
+            }
+            if !no_pause {
+                pause();
+            }
+            if r.is_err() {
+                std::process::exit(1);
+            }
+            return;
+        }
+    };
 
-    let result = run(&cli);
     if let Err(ref e) = result {
         eprintln!("{} {e:#}", "error:".bright_red().bold());
     }
-
-    if !cli.no_pause && !cli.json {
-        eprintln!();
-        eprintln!("Press Enter to exit...");
-        let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8]);
-    }
-
+    pause();
     if result.is_err() {
         std::process::exit(1);
     }
 }
 
-fn run(cli: &Cli) -> Result<()> {
+fn pause() {
+    eprintln!();
+    eprintln!("Press Enter to exit...");
+    let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8]);
+}
+
+enum EntryMode {
+    Interactive,
+    DragDrop(PathBuf),
+    Flagged,
+}
+
+/// Picks an entry mode from the raw argv, before clap runs — mirrors `hematite-cli`'s
+/// `detect_entry_mode`. A single existing path with no flags covers both a dropped file and a
+/// dropped folder; `run()` dispatches on `is_file()`/`is_dir()` from there.
+fn detect_entry_mode(raw: &[String]) -> EntryMode {
+    let user_args: Vec<&str> = raw.iter().skip(1).map(|s| s.as_str()).collect();
+
+    if user_args.is_empty() {
+        return EntryMode::Interactive;
+    }
+
+    if user_args.len() == 1 {
+        let only = user_args[0];
+        if !only.starts_with('-') && Path::new(only).exists() {
+            return EntryMode::DragDrop(PathBuf::from(only));
+        }
+    }
+
+    EntryMode::Flagged
+}
+
+pub fn run(cli: &Cli) -> Result<()> {
     if !cli.input.exists() {
         anyhow::bail!("input path does not exist: {}", cli.input.display());
     }

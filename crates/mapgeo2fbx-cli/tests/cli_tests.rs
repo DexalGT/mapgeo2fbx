@@ -150,3 +150,24 @@ fn converts_folder_recursively() {
     assert!(dir.path().join("a.fbx").exists());
     assert!(nested.join("b.fbx").exists());
 }
+
+#[test]
+fn flagged_mode_with_output_override_works() {
+    let dir = tempdir().expect("tempdir");
+    let input_path = dir.path().join("test.mapgeo");
+    fs::write(&input_path, minimal_v17_bytes()).expect("write fixture");
+    let output_path = dir.path().join("custom_name.fbx");
+
+    Command::cargo_bin("mapgeo2fbx")
+        .expect("binary exists")
+        .arg(&input_path)
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--no-pause")
+        .arg("--json")
+        .assert()
+        .success();
+
+    assert!(output_path.exists());
+    assert!(!dir.path().join("test.fbx").exists());
+}
