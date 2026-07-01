@@ -128,3 +128,25 @@ fn info_only_does_not_write_fbx() {
     let output_path = dir.path().join("test.fbx");
     assert!(!output_path.exists(), "--info-only must not write an fbx file");
 }
+
+#[test]
+fn converts_folder_recursively() {
+    let dir = tempdir().expect("tempdir");
+    let nested = dir.path().join("nested");
+    fs::create_dir(&nested).expect("mkdir nested");
+
+    fs::write(dir.path().join("a.mapgeo"), minimal_v17_bytes()).expect("write a");
+    fs::write(nested.join("b.mapgeo"), minimal_v17_bytes()).expect("write b");
+
+    Command::cargo_bin("mapgeo2fbx")
+        .expect("binary exists")
+        .arg(dir.path())
+        .arg("--no-pause")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(contains("\"converted\": 2"));
+
+    assert!(dir.path().join("a.fbx").exists());
+    assert!(nested.join("b.fbx").exists());
+}
