@@ -81,7 +81,10 @@ pub fn convert_folder(root: &Path, ui: &UiReporter) -> BatchSummary {
                 ui.converted(&path.display().to_string());
             }
             Err(e) => {
-                failed.lock().expect("lock poisoned").push((path.clone(), format!("{e:#}")));
+                failed
+                    .lock()
+                    .expect("lock poisoned")
+                    .push((path.clone(), format!("{e:#}")));
                 ui.failed(&path.display().to_string(), &format!("{e:#}"));
             }
         }

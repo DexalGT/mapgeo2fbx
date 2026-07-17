@@ -21,7 +21,10 @@ pub fn init(log_level: LogLevel, json: bool) {
         .from_env_lossy();
 
     let result = if json {
-        tracing_subscriber::fmt().json().with_env_filter(filter).try_init()
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .try_init()
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)

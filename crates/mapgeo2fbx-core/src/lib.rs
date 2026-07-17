@@ -1,5 +1,5 @@
-mod error;
 pub mod decode;
+mod error;
 pub mod fbx;
 pub mod info;
 

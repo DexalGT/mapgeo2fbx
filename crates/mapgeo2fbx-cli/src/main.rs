@@ -164,7 +164,10 @@ pub fn run(cli: &Cli) -> Result<()> {
 
 fn print_info(info: &FileInfo, json: bool, verbose: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(info).expect("FileInfo serializes"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(info).expect("FileInfo serializes")
+        );
         return;
     }
     if verbose {

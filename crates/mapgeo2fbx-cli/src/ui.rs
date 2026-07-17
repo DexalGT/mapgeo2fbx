@@ -29,11 +29,9 @@ impl UiReporter {
             Mode::Live => {
                 let pb = ProgressBar::new(total);
                 pb.set_style(
-                    ProgressStyle::with_template(
-                        "  [{bar:30.cyan/black}] {pos}/{len} {msg}",
-                    )
-                    .expect("hard-coded progress style is valid")
-                    .progress_chars("█▉▊▋▌▍▎  "),
+                    ProgressStyle::with_template("  [{bar:30.cyan/black}] {pos}/{len} {msg}")
+                        .expect("hard-coded progress style is valid")
+                        .progress_chars("█▉▊▋▌▍▎  "),
                 );
                 Some(pb)
             }
@@ -56,7 +54,12 @@ impl UiReporter {
     }
 
     pub fn failed(&self, name: &str, error: &str) {
-        let line = format!("  {} {} — {}", "✗".bright_red().bold(), name, error.bright_black());
+        let line = format!(
+            "  {} {} — {}",
+            "✗".bright_red().bold(),
+            name,
+            error.bright_black()
+        );
         match &self.bar {
             Some(bar) => bar.println(line),
             None => eprintln!("{line}"),

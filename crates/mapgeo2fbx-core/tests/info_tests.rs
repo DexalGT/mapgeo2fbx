@@ -96,7 +96,10 @@ fn summarizes_file_and_model_totals() {
     assert_eq!(info.models[0].name, "MapGeo_Instance_0");
     assert_eq!(info.models[0].vertex_count, 3);
     assert_eq!(info.models[0].triangle_count, 1);
-    assert_eq!(info.models[0].materials, vec!["Materials/Grass".to_string()]);
+    assert_eq!(
+        info.models[0].materials,
+        vec!["Materials/Grass".to_string()]
+    );
 
     let rendered = format!("{info}");
     assert!(rendered.contains("version: 17"));

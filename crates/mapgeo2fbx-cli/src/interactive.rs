@@ -15,7 +15,9 @@ pub fn run() -> Result<()> {
         let action = prompt_action()?;
         match action {
             Action::Convert => {
-                if let Some(path) = prompt_path("Drop a .mapgeo file or folder here (or paste a path)")? {
+                if let Some(path) =
+                    prompt_path("Drop a .mapgeo file or folder here (or paste a path)")?
+                {
                     let cli = baseline_cli(path);
                     if let Err(e) = crate::run(&cli) {
                         eprintln!("{} {e:#}", "error:".bright_red().bold());
@@ -23,7 +25,9 @@ pub fn run() -> Result<()> {
                 }
             }
             Action::InfoOnly => {
-                if let Some(path) = prompt_path("Drop a .mapgeo file here to inspect (or paste a path)")? {
+                if let Some(path) =
+                    prompt_path("Drop a .mapgeo file here to inspect (or paste a path)")?
+                {
                     let mut cli = baseline_cli(path);
                     cli.info_only = true;
                     cli.verbose = true;
@@ -52,8 +56,16 @@ enum Action {
 }
 
 const MENU: &[(Action, &str, &str)] = &[
-    (Action::Convert, "Convert a .mapgeo (or folder)", "writes .fbx next to each source"),
-    (Action::InfoOnly, "Show info only", "inspect a .mapgeo without converting"),
+    (
+        Action::Convert,
+        "Convert a .mapgeo (or folder)",
+        "writes .fbx next to each source",
+    ),
+    (
+        Action::InfoOnly,
+        "Show info only",
+        "inspect a .mapgeo without converting",
+    ),
     (Action::Quit, "Quit", ""),
 ];
 
@@ -64,7 +76,12 @@ fn prompt_action() -> Result<Action> {
         if hint.is_empty() {
             eprintln!("    [{}]  {}", i + 1, label);
         } else {
-            eprintln!("    [{}]  {} {}", i + 1, label, format!("— {hint}").bright_black());
+            eprintln!(
+                "    [{}]  {} {}",
+                i + 1,
+                label,
+                format!("— {hint}").bright_black()
+            );
         }
     }
     eprintln!();
@@ -84,7 +101,10 @@ fn prompt_action() -> Result<Action> {
                 return Ok(MENU[n - 1].0);
             }
         }
-        eprintln!("  not a valid choice — try 1-{} (or 'q' to quit).", MENU.len());
+        eprintln!(
+            "  not a valid choice — try 1-{} (or 'q' to quit).",
+            MENU.len()
+        );
     }
 }
 
