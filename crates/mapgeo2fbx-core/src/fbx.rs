@@ -4,24 +4,22 @@ use std::io::Write;
 use crate::decode::DecodedMesh;
 use crate::error::{Error, Result};
 
-/// Per-mesh object ids. A mesh needs three FBX objects: the Model (transform node), the
-/// NodeAttribute that tells Maya the node is a mesh, and the Geometry that holds the vertices.
-struct MeshIds {
-    model_id: i64,
-    node_attribute_id: i64,
-    geometry_id: i64,
-}
-
-/// Writes an ASCII FBX 7.4 scene containing one Model + NodeAttribute + Geometry per input mesh,
-/// with per-submesh material assignment via a `ByPolygon`/`IndexToDirect` `LayerElementMaterial`.
+/// Writes a **binary** FBX 7.4 scene containing one Model + Geometry pair per input mesh, with
+/// per-submesh material assignment via a `ByPolygon`/`IndexToDirect` `LayerElementMaterial`.
 /// Material nodes are deduplicated by name across the whole scene.
 ///
-/// The output targets Autodesk Maya's importer, which is much stricter than Blender's: names use
-/// the ASCII `Class::name` form (never the raw `\x00\x01` binary separator), every mesh carries a
-/// `NodeAttribute` of subclass `"Mesh"` so Maya binds the geometry to its transform instead of
-/// leaving an empty node, and the header/`Definitions` declare `GlobalSettings` with an accurate
-/// object count.
+/// The output targets Autodesk Maya. An earlier ASCII writer produced files that Blender read but
+/// Maya imported as empty transform nodes: Maya's ASCII importer drops meshes whose vertex arrays
+/// are written as a single multi-megabyte line. Binary FBX stores every array as a length-prefixed
+/// typed block, so there is no line-length fragility — this is the exact encoding Maya's own
+/// exporter uses. The Geometry connects directly to its Model (no NodeAttribute); a decoded Maya
+/// export confirms mesh models bind their geometry that way.
 pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()> {
+    // Approach: serialize the whole document into an in-memory buffer so node end-offsets can be
+    // back-patched once each node's children are written, then flush the buffer to `writer`. This
+    // keeps the public signature `W: Write` (no Seek bound on callers).
+    let mut b = Buf::new();
+
     let mut next_id: i64 = 1_000_000;
     let mut alloc_id = move || {
         let id = next_id;
@@ -29,22 +27,13 @@ pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()>
         id
     };
 
-    // Assign Model/NodeAttribute/Geometry ids per mesh first, then material ids, so ids stay
-    // stable and low-numbered ids land on the per-mesh objects before any Material.
-    let mut mesh_ids = Vec::with_capacity(meshes.len());
+    // Model/Geometry ids per mesh first, then material ids, so ids stay stable and low.
+    let mut model_geometry_ids = Vec::with_capacity(meshes.len());
     for _mesh in meshes {
         let model_id = alloc_id();
-        let node_attribute_id = alloc_id();
         let geometry_id = alloc_id();
-        mesh_ids.push(MeshIds {
-            model_id,
-            node_attribute_id,
-            geometry_id,
-        });
+        model_geometry_ids.push((model_id, geometry_id));
     }
-
-    // Assign a stable object id to every unique material name across all meshes, so
-    // Connections can reference them regardless of which mesh first used them.
     let mut material_ids: HashMap<String, i64> = HashMap::new();
     for mesh in meshes {
         for submesh in &mesh.submeshes {
@@ -54,380 +43,617 @@ pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()>
         }
     }
 
-    write_header(writer)?;
-    write_global_settings(writer)?;
-    write_documents(writer)?;
-    writeln!(writer, "References:  {{\n}}\n")?;
-    write_definitions(writer, meshes.len(), material_ids.len())?;
+    write_document(&mut b, meshes, &model_geometry_ids, &material_ids)?;
 
-    writeln!(writer, "Objects:  {{")?;
-    for (mesh, ids) in meshes.iter().zip(&mesh_ids) {
-        write_model(writer, ids.model_id, &mesh.name)?;
-        write_node_attribute(writer, ids.node_attribute_id)?;
-        write_geometry(writer, ids.geometry_id, mesh, &material_ids)?;
-    }
-    let mut sorted_materials: Vec<(&String, &i64)> = material_ids.iter().collect();
-    sorted_materials.sort_by_key(|(_, id)| **id);
-    for (name, id) in sorted_materials {
-        write_material(writer, *id, name)?;
-    }
-    writeln!(writer, "}}\n")?;
-
-    writeln!(writer, "Connections:  {{")?;
-    for (mesh, ids) in meshes.iter().zip(&mesh_ids) {
-        writeln!(writer, "\tC: \"OO\",{},{}", ids.geometry_id, ids.model_id)?;
-        writeln!(
-            writer,
-            "\tC: \"OO\",{},{}",
-            ids.node_attribute_id, ids.model_id
-        )?;
-        writeln!(writer, "\tC: \"OO\",{},0", ids.model_id)?;
-        let mut seen = std::collections::HashSet::new();
-        for submesh in &mesh.submeshes {
-            if seen.insert(&submesh.name) {
-                let material_id = material_ids[&submesh.name];
-                writeln!(writer, "\tC: \"OO\",{material_id},{}", ids.model_id)?;
-            }
-        }
-    }
-    writeln!(writer, "}}\n")?;
-
+    writer.write_all(&b.into_bytes())?;
     Ok(())
 }
 
-fn write_header<W: Write>(writer: &mut W) -> Result<()> {
-    // Maya's importer validates a complete FBXHeaderExtension: a CreationTimeStamp block and a
-    // SceneInfo, plus a top-level CreationTime/Creator, exactly as the FBX SDK emits. The
-    // timestamp is fixed (not the wall clock) so output is deterministic and reproducible.
-    writeln!(writer, "; FBX 7.4.0 project file")?;
-    writeln!(writer, "FBXHeaderExtension:  {{")?;
-    writeln!(writer, "\tFBXHeaderVersion: 1003")?;
-    writeln!(writer, "\tFBXVersion: 7400")?;
-    writeln!(writer, "\tCreationTimeStamp:  {{")?;
-    writeln!(writer, "\t\tVersion: 1000")?;
-    writeln!(writer, "\t\tYear: 1970")?;
-    writeln!(writer, "\t\tMonth: 1")?;
-    writeln!(writer, "\t\tDay: 1")?;
-    writeln!(writer, "\t\tHour: 0")?;
-    writeln!(writer, "\t\tMinute: 0")?;
-    writeln!(writer, "\t\tSecond: 0")?;
-    writeln!(writer, "\t\tMillisecond: 0")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "\tCreator: \"mapgeo2fbx\"")?;
-    writeln!(
-        writer,
-        "\tSceneInfo: \"SceneInfo::GlobalInfo\", \"UserData\" {{"
-    )?;
-    writeln!(writer, "\t\tType: \"UserData\"")?;
-    writeln!(writer, "\t\tVersion: 100")?;
-    writeln!(writer, "\t\tMetaData:  {{")?;
-    writeln!(writer, "\t\t\tVersion: 100")?;
-    writeln!(writer, "\t\t\tTitle: \"\"")?;
-    writeln!(writer, "\t\t\tSubject: \"\"")?;
-    writeln!(writer, "\t\t\tAuthor: \"\"")?;
-    writeln!(writer, "\t\t\tKeywords: \"\"")?;
-    writeln!(writer, "\t\t\tRevision: \"\"")?;
-    writeln!(writer, "\t\t\tComment: \"\"")?;
-    writeln!(writer, "\t\t}}")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "}}\n")?;
-    writeln!(writer, "CreationTime: \"1970-01-01 00:00:00:000\"")?;
-    writeln!(writer, "Creator: \"mapgeo2fbx\"\n")?;
-    Ok(())
-}
-
-fn write_global_settings<W: Write>(writer: &mut W) -> Result<()> {
-    writeln!(writer, "GlobalSettings:  {{")?;
-    writeln!(writer, "\tVersion: 1000")?;
-    writeln!(writer, "\tProperties70:  {{")?;
-    writeln!(writer, "\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",1")?;
-    writeln!(
-        writer,
-        "\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1"
-    )?;
-    writeln!(writer, "\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",2")?;
-    writeln!(
-        writer,
-        "\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1"
-    )?;
-    writeln!(writer, "\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0")?;
-    writeln!(
-        writer,
-        "\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1"
-    )?;
-    writeln!(
-        writer,
-        "\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1"
-    )?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "}}\n")?;
-    Ok(())
-}
-
-fn write_documents<W: Write>(writer: &mut W) -> Result<()> {
-    writeln!(writer, "Documents:  {{")?;
-    writeln!(writer, "\tCount: 1")?;
-    writeln!(writer, "\tDocument: 1000000000, \"\", \"Scene\" {{")?;
-    writeln!(writer, "\t\tProperties70:  {{")?;
-    writeln!(writer, "\t\t\tP: \"SourceObject\", \"object\", \"\", \"\"")?;
-    writeln!(
-        writer,
-        "\t\t\tP: \"ActiveAnimStackName\", \"KString\", \"\", \"\", \"\""
-    )?;
-    writeln!(writer, "\t\t}}")?;
-    writeln!(writer, "\t\tRootNode: 0")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "}}\n")?;
-    Ok(())
-}
-
-fn write_definitions<W: Write>(
-    writer: &mut W,
-    model_count: usize,
-    material_count: usize,
-) -> Result<()> {
-    // Each mesh contributes a Model, a NodeAttribute, and a Geometry; plus one GlobalSettings for
-    // the whole scene. Maya's importer expects GlobalSettings to be declared here (Blender does
-    // not care) and the total Count to cover every declared object type.
-    let total = 1 + model_count * 3 + material_count;
-    writeln!(writer, "Definitions:  {{")?;
-    writeln!(writer, "\tVersion: 100")?;
-    writeln!(writer, "\tCount: {total}")?;
-    writeln!(writer, "\tObjectType: \"GlobalSettings\" {{")?;
-    writeln!(writer, "\t\tCount: 1")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "\tObjectType: \"Model\" {{")?;
-    writeln!(writer, "\t\tCount: {model_count}")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "\tObjectType: \"NodeAttribute\" {{")?;
-    writeln!(writer, "\t\tCount: {model_count}")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "\tObjectType: \"Geometry\" {{")?;
-    writeln!(writer, "\t\tCount: {model_count}")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "\tObjectType: \"Material\" {{")?;
-    writeln!(writer, "\t\tCount: {material_count}")?;
-    writeln!(writer, "\t}}")?;
-    writeln!(writer, "}}\n")?;
-    Ok(())
-}
-
-fn write_model<W: Write>(writer: &mut W, model_id: i64, name: &str) -> Result<()> {
-    // ASCII FBX object declarations name the object as "Class::name" — a plain UTF-8 string with a
-    // literal double colon, class word first. The raw \x00\x01 (NUL+SOH) separator is the *binary*
-    // FBX internal form; writing those control bytes into an ASCII file makes Maya's strict SDK
-    // parser fail to resolve the object, so the mesh never binds and the outliner shows an empty
-    // node. Blender tolerates both forms, which is why the bug only surfaces in Maya.
-    writeln!(
-        writer,
-        "\tModel: {model_id}, \"Model::{name}\", \"Mesh\" {{"
-    )?;
-    writeln!(writer, "\t\tVersion: 232")?;
-    writeln!(writer, "\t\tProperties70:  {{")?;
-    writeln!(
-        writer,
-        "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0"
-    )?;
-    writeln!(
-        writer,
-        "\t\t\tP: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\",0,0,0"
-    )?;
-    writeln!(
-        writer,
-        "\t\t\tP: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",1,1,1"
-    )?;
-    writeln!(writer, "\t\t}}")?;
-    writeln!(writer, "\t\tShading: T")?;
-    writeln!(writer, "\t\tCulling: \"CullingOff\"")?;
-    writeln!(writer, "\t}}\n")?;
-    Ok(())
-}
-
-fn write_node_attribute<W: Write>(writer: &mut W, node_attribute_id: i64) -> Result<()> {
-    // Maya decides a transform node is a mesh from a connected NodeAttribute of subclass "Mesh"
-    // (FbxNodeAttribute::eMesh), not from the Geometry connection alone. Without it Maya imports
-    // the Model as a bare transform and drops the geometry, leaving an empty node in the outliner.
-    // The attribute carries no data of its own; the Geometry holds the vertices.
-    writeln!(
-        writer,
-        "\tNodeAttribute: {node_attribute_id}, \"NodeAttribute::\", \"Mesh\" {{"
-    )?;
-    writeln!(writer, "\t\tProperties70:  {{")?;
-    writeln!(writer, "\t\t}}")?;
-    writeln!(writer, "\t\tTypeFlags: \"Null\"")?;
-    writeln!(writer, "\t}}\n")?;
-    Ok(())
-}
-
-fn write_geometry<W: Write>(
-    writer: &mut W,
-    geometry_id: i64,
-    mesh: &DecodedMesh,
+fn write_document(
+    b: &mut Buf,
+    meshes: &[DecodedMesh],
+    model_geometry_ids: &[(i64, i64)],
     material_ids: &HashMap<String, i64>,
 ) -> Result<()> {
-    // Vertex world transform is already baked into position/normal by decode::decode_geometry,
-    // so the Model's Lcl Translation/Rotation/Scaling above stay identity.
-    let vertex_count = mesh.vertices.len();
+    // Binary FBX header: 21-byte magic, two bytes {0x1A, 0x00}, then the u32 version.
+    b.raw(b"Kaydara FBX Binary  \x00");
+    b.raw(&[0x1a, 0x00]);
+    b.u32(7400);
 
-    let mut ordered_material_names: Vec<&String> = Vec::new();
-    let mut name_to_local_index: HashMap<&str, u32> = HashMap::new();
-    for submesh in &mesh.submeshes {
-        if !name_to_local_index.contains_key(submesh.name.as_str()) {
-            name_to_local_index.insert(submesh.name.as_str(), ordered_material_names.len() as u32);
-            ordered_material_names.push(&submesh.name);
-        }
+    write_header_extension(b);
+    top_level(b, "FileId", |b| {
+        // A fixed 16-byte id; content is not validated by importers.
+        b.prop_raw_bytes(&[0u8; 16]);
+    });
+    top_level(b, "CreationTime", |b| {
+        b.prop_str("1970-01-01 00:00:00:000");
+    });
+    top_level(b, "Creator", |b| {
+        b.prop_str("mapgeo2fbx");
+    });
+
+    write_global_settings(b);
+    write_documents(b);
+    top_level(b, "References", |_b| {});
+    write_definitions(b, meshes.len(), material_ids.len());
+    write_objects(b, meshes, model_geometry_ids, material_ids)?;
+    write_connections(b, meshes, model_geometry_ids, material_ids);
+
+    // A top-level null record closes the node list, then the footer.
+    b.null_record();
+    write_footer(b);
+    Ok(())
+}
+
+fn write_header_extension(b: &mut Buf) {
+    node(b, "FBXHeaderExtension", |_| {}, |b| {
+        leaf_i32(b, "FBXHeaderVersion", 1003);
+        leaf_i32(b, "FBXVersion", 7400);
+        node(b, "CreationTimeStamp", |_| {}, |b| {
+            leaf_i32(b, "Version", 1000);
+            leaf_i32(b, "Year", 1970);
+            leaf_i32(b, "Month", 1);
+            leaf_i32(b, "Day", 1);
+            leaf_i32(b, "Hour", 0);
+            leaf_i32(b, "Minute", 0);
+            leaf_i32(b, "Second", 0);
+            leaf_i32(b, "Millisecond", 0);
+        });
+        node(b, "Creator", |b| b.prop_str("mapgeo2fbx"), |_| {});
+    });
+}
+
+fn write_global_settings(b: &mut Buf) {
+    node(b, "GlobalSettings", |_| {}, |b| {
+        leaf_i32(b, "Version", 1000);
+        node(b, "Properties70", |_| {}, |b| {
+            prop70_int(b, "UpAxis", 1);
+            prop70_int(b, "UpAxisSign", 1);
+            prop70_int(b, "FrontAxis", 2);
+            prop70_int(b, "FrontAxisSign", 1);
+            prop70_int(b, "CoordAxis", 0);
+            prop70_int(b, "CoordAxisSign", 1);
+            prop70_double(b, "UnitScaleFactor", 1.0);
+        });
+    });
+}
+
+fn write_documents(b: &mut Buf) {
+    node(b, "Documents", |_| {}, |b| {
+        leaf_i32(b, "Count", 1);
+        node(
+            b,
+            "Document",
+            |b| {
+                b.prop_i64(1_000_000_000);
+                b.prop_str("Scene");
+                b.prop_str("Scene");
+            },
+            |b| {
+                node(b, "RootNode", |b| b.prop_i64(0), |_| {});
+            },
+        );
+    });
+}
+
+fn write_definitions(b: &mut Buf, model_count: usize, material_count: usize) {
+    // One GlobalSettings + one Model and Geometry per mesh + one Material per unique name.
+    let total = 1 + model_count * 2 + material_count;
+    node(b, "Definitions", |_| {}, |b| {
+        leaf_i32(b, "Version", 100);
+        leaf_i32(b, "Count", total as i32);
+        object_type(b, "GlobalSettings", 1);
+        object_type(b, "Model", model_count as i32);
+        object_type(b, "Geometry", model_count as i32);
+        object_type(b, "Material", material_count as i32);
+    });
+}
+
+fn object_type(b: &mut Buf, name: &str, count: i32) {
+    node(b, "ObjectType", |b| b.prop_str(name), |b| {
+        leaf_i32(b, "Count", count);
+    });
+}
+
+fn write_objects(
+    b: &mut Buf,
+    meshes: &[DecodedMesh],
+    model_geometry_ids: &[(i64, i64)],
+    material_ids: &HashMap<String, i64>,
+) -> Result<()> {
+    // `node` closures cannot return a Result, so build the geometry payloads first (which is where
+    // index-out-of-range is detected) and only then emit the tree.
+    let mut geometries = Vec::with_capacity(meshes.len());
+    for mesh in meshes {
+        geometries.push(build_geometry(mesh)?);
     }
-    let _ = material_ids; // material_ids is used by write_fbx's Connections; local index is what LayerElementMaterial needs.
 
-    let mut polygon_vertex_index: Vec<i64> = Vec::new();
-    let mut material_per_polygon: Vec<u32> = Vec::new();
-    for submesh in &mesh.submeshes {
-        let local_material_index = name_to_local_index[submesh.name.as_str()];
-        for tri in &submesh.triangle_indices {
-            polygon_vertex_index.push(tri[0] as i64);
-            polygon_vertex_index.push(tri[1] as i64);
-            polygon_vertex_index.push(-(tri[2] as i64) - 1);
-            material_per_polygon.push(local_material_index);
+    node_result(b, "Objects", |_| {}, |b| {
+        for ((mesh, (model_id, geometry_id)), geometry) in
+            meshes.iter().zip(model_geometry_ids).zip(&geometries)
+        {
+            write_model(b, *model_id, &mesh.name);
+            write_geometry(b, *geometry_id, &mesh.name, geometry);
         }
+        let mut sorted_materials: Vec<(&String, &i64)> = material_ids.iter().collect();
+        sorted_materials.sort_by_key(|(_, id)| **id);
+        for (name, id) in sorted_materials {
+            write_material(b, *id, name);
+        }
+        Ok::<(), Error>(())
+    })
+}
+
+fn write_model(b: &mut Buf, model_id: i64, name: &str) {
+    node(
+        b,
+        "Model",
+        |b| {
+            b.prop_i64(model_id);
+            b.prop_name_class(name, "Model");
+            b.prop_str("Mesh");
+        },
+        |b| {
+            leaf_i32(b, "Version", 232);
+            node(b, "Properties70", |_| {}, |b| {
+                // World transform is baked into the vertices, so the node stays at identity.
+                prop70_lcl(b, "Lcl Translation", 0.0, 0.0, 0.0);
+                prop70_lcl(b, "Lcl Rotation", 0.0, 0.0, 0.0);
+                prop70_lcl(b, "Lcl Scaling", 1.0, 1.0, 1.0);
+            });
+            node(b, "Shading", |b| b.prop_bool(true), |_| {});
+            node(b, "Culling", |b| b.prop_str("CullingOff"), |_| {});
+        },
+    );
+}
+
+/// Precomputed geometry arrays for one mesh, in FBX order.
+struct GeometryData {
+    positions: Vec<f64>,
+    polygon_vertex_index: Vec<i32>,
+    normals: Vec<f64>,
+    uvs: Vec<f64>,
+    uv_index: Vec<i32>,
+    material_per_polygon: Vec<i32>,
+}
+
+fn build_geometry(mesh: &DecodedMesh) -> Result<GeometryData> {
+    let mut name_to_local_index: HashMap<&str, i32> = HashMap::new();
+    let mut next_local = 0i32;
+    for submesh in &mesh.submeshes {
+        name_to_local_index.entry(submesh.name.as_str()).or_insert_with(|| {
+            let i = next_local;
+            next_local += 1;
+            i
+        });
     }
-    let polygon_count = material_per_polygon.len();
 
-    writeln!(
-        writer,
-        "\tGeometry: {geometry_id}, \"Geometry::{}\", \"Mesh\" {{",
-        mesh.name
-    )?;
-
-    let vertex_floats: Vec<String> = mesh
+    let positions: Vec<f64> = mesh
         .vertices
         .iter()
-        .flat_map(|v| [v.position.x, v.position.y, v.position.z])
-        .map(format_f32)
+        .flat_map(|v| {
+            [
+                v.position.x as f64,
+                v.position.y as f64,
+                v.position.z as f64,
+            ]
+        })
         .collect();
-    writeln!(writer, "\t\tVertices: *{} {{", vertex_count * 3)?;
-    writeln!(writer, "\t\t\ta: {}", vertex_floats.join(","))?;
-    writeln!(writer, "\t\t}}")?;
 
-    let index_strs: Vec<String> = polygon_vertex_index.iter().map(|i| i.to_string()).collect();
-    writeln!(
-        writer,
-        "\t\tPolygonVertexIndex: *{} {{",
-        polygon_vertex_index.len()
-    )?;
-    writeln!(writer, "\t\t\ta: {}", index_strs.join(","))?;
-    writeln!(writer, "\t\t}}")?;
-    writeln!(writer, "\t\tGeometryVersion: 124")?;
-
-    // Normals: ByPolygonVertex/Direct, one triplet per (polygon, vertex-in-polygon) — since
-    // every polygon here is a triangle, this is 3x the polygon count and mirrors the winding
-    // order used above.
-    let mut normal_floats: Vec<String> = Vec::new();
+    let mut polygon_vertex_index: Vec<i32> = Vec::new();
+    let mut material_per_polygon: Vec<i32> = Vec::new();
+    let mut normals: Vec<f64> = Vec::new();
+    let mut uv_index: Vec<i32> = Vec::new();
     for submesh in &mesh.submeshes {
+        let local = name_to_local_index[submesh.name.as_str()];
         for tri in &submesh.triangle_indices {
+            // FBX marks the last index of a polygon by bitwise-negation (~i == -i - 1).
+            polygon_vertex_index.push(tri[0] as i32);
+            polygon_vertex_index.push(tri[1] as i32);
+            polygon_vertex_index.push(!(tri[2] as i32));
+            material_per_polygon.push(local);
             for &vi in tri {
-                let v =
-                    mesh.vertices
-                        .get(vi as usize)
-                        .ok_or_else(|| Error::VertexIndexOutOfRange {
-                            mesh: mesh.name.clone(),
-                            index: vi,
-                            vertex_count: mesh.vertices.len(),
-                        })?;
-                normal_floats.push(format_f32(v.normal.x));
-                normal_floats.push(format_f32(v.normal.y));
-                normal_floats.push(format_f32(v.normal.z));
+                let v = mesh
+                    .vertices
+                    .get(vi as usize)
+                    .ok_or_else(|| Error::VertexIndexOutOfRange {
+                        mesh: mesh.name.clone(),
+                        index: vi,
+                        vertex_count: mesh.vertices.len(),
+                    })?;
+                normals.push(v.normal.x as f64);
+                normals.push(v.normal.y as f64);
+                normals.push(v.normal.z as f64);
+                uv_index.push(vi as i32);
             }
         }
     }
-    writeln!(writer, "\t\tLayerElementNormal: 0 {{")?;
-    writeln!(writer, "\t\t\tVersion: 101")?;
-    writeln!(writer, "\t\t\tName: \"\"")?;
-    writeln!(writer, "\t\t\tMappingInformationType: \"ByPolygonVertex\"")?;
-    writeln!(writer, "\t\t\tReferenceInformationType: \"Direct\"")?;
-    writeln!(writer, "\t\t\tNormals: *{} {{", normal_floats.len())?;
-    writeln!(writer, "\t\t\t\ta: {}", normal_floats.join(","))?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t}}")?;
 
-    // UVs: Direct per-vertex array + IndexToDirect index list matching PolygonVertexIndex order.
-    let uv_floats: Vec<String> = mesh
+    let uvs: Vec<f64> = mesh
         .vertices
         .iter()
-        .flat_map(|v| [v.uv0.x, v.uv0.y])
-        .map(format_f32)
+        .flat_map(|v| [v.uv0.x as f64, v.uv0.y as f64])
         .collect();
-    let mut uv_index: Vec<u32> = Vec::new();
-    for submesh in &mesh.submeshes {
-        for tri in &submesh.triangle_indices {
-            uv_index.extend_from_slice(tri);
+
+    Ok(GeometryData {
+        positions,
+        polygon_vertex_index,
+        normals,
+        uvs,
+        uv_index,
+        material_per_polygon,
+    })
+}
+
+fn write_geometry(b: &mut Buf, geometry_id: i64, name: &str, g: &GeometryData) {
+    node(
+        b,
+        "Geometry",
+        |b| {
+            b.prop_i64(geometry_id);
+            b.prop_name_class(name, "Geometry");
+            b.prop_str("Mesh");
+        },
+        |b| {
+            node(b, "Vertices", |b| b.prop_array_f64(&g.positions), |_| {});
+            node(
+                b,
+                "PolygonVertexIndex",
+                |b| b.prop_array_i32(&g.polygon_vertex_index),
+                |_| {},
+            );
+            leaf_i32(b, "GeometryVersion", 124);
+
+            // Normals: ByPolygonVertex/Direct, one triplet per (polygon, vertex-in-polygon).
+            node(b, "LayerElementNormal", |b| b.prop_i32(0), |b| {
+                leaf_i32(b, "Version", 101);
+                node(b, "Name", |b| b.prop_str(""), |_| {});
+                leaf_str(b, "MappingInformationType", "ByPolygonVertex");
+                leaf_str(b, "ReferenceInformationType", "Direct");
+                node(b, "Normals", |b| b.prop_array_f64(&g.normals), |_| {});
+            });
+
+            // UVs: Direct per-vertex array + IndexToDirect index list matching polygon order.
+            node(b, "LayerElementUV", |b| b.prop_i32(0), |b| {
+                leaf_i32(b, "Version", 101);
+                node(b, "Name", |b| b.prop_str(""), |_| {});
+                leaf_str(b, "MappingInformationType", "ByPolygonVertex");
+                leaf_str(b, "ReferenceInformationType", "IndexToDirect");
+                node(b, "UV", |b| b.prop_array_f64(&g.uvs), |_| {});
+                node(b, "UVIndex", |b| b.prop_array_i32(&g.uv_index), |_| {});
+            });
+
+            // Materials: one index per triangle (ByPolygon/IndexToDirect).
+            node(b, "LayerElementMaterial", |b| b.prop_i32(0), |b| {
+                leaf_i32(b, "Version", 101);
+                node(b, "Name", |b| b.prop_str(""), |_| {});
+                leaf_str(b, "MappingInformationType", "ByPolygon");
+                leaf_str(b, "ReferenceInformationType", "IndexToDirect");
+                node(
+                    b,
+                    "Materials",
+                    |b| b.prop_array_i32(&g.material_per_polygon),
+                    |_| {},
+                );
+            });
+
+            node(b, "Layer", |b| b.prop_i32(0), |b| {
+                leaf_i32(b, "Version", 100);
+                layer_element(b, "LayerElementNormal");
+                layer_element(b, "LayerElementMaterial");
+                layer_element(b, "LayerElementUV");
+            });
+        },
+    );
+}
+
+fn layer_element(b: &mut Buf, type_name: &str) {
+    node(b, "LayerElement", |_| {}, |b| {
+        leaf_str(b, "Type", type_name);
+        leaf_i32(b, "TypedIndex", 0);
+    });
+}
+
+fn write_material(b: &mut Buf, material_id: i64, name: &str) {
+    node(
+        b,
+        "Material",
+        |b| {
+            b.prop_i64(material_id);
+            b.prop_name_class(name, "Material");
+            b.prop_str("");
+        },
+        |b| {
+            leaf_i32(b, "Version", 102);
+            node(b, "ShadingModel", |b| b.prop_str("Lambert"), |_| {});
+            leaf_i32(b, "MultiLayer", 0);
+            node(b, "Properties70", |_| {}, |b| {
+                prop70_color(b, "DiffuseColor", 0.8, 0.8, 0.8);
+            });
+        },
+    );
+}
+
+fn write_connections(
+    b: &mut Buf,
+    meshes: &[DecodedMesh],
+    model_geometry_ids: &[(i64, i64)],
+    material_ids: &HashMap<String, i64>,
+) {
+    node(b, "Connections", |_| {}, |b| {
+        for (mesh, (model_id, geometry_id)) in meshes.iter().zip(model_geometry_ids) {
+            connect_oo(b, *geometry_id, *model_id);
+            connect_oo(b, *model_id, 0);
+            let mut seen = std::collections::HashSet::new();
+            for submesh in &mesh.submeshes {
+                if seen.insert(&submesh.name) {
+                    connect_oo(b, material_ids[&submesh.name], *model_id);
+                }
+            }
+        }
+    });
+}
+
+fn connect_oo(b: &mut Buf, src: i64, dst: i64) {
+    node(
+        b,
+        "C",
+        |b| {
+            b.prop_str("OO");
+            b.prop_i64(src);
+            b.prop_i64(dst);
+        },
+        |_| {},
+    );
+}
+
+fn write_footer(b: &mut Buf) {
+    // The FBX binary footer: a fixed magic, zero padding to a 16-byte boundary, then the version
+    // and a second fixed magic. These byte sequences are constant across FBX SDK exports.
+    const FOOTER_MAGIC1: [u8; 16] = [
+        0xfa, 0xbc, 0xab, 0x09, 0xd0, 0xc8, 0xd4, 0x66, 0xb1, 0x76, 0xfb, 0x83, 0x1c, 0xf7, 0x26,
+        0x7e,
+    ];
+    const FOOTER_MAGIC2: [u8; 16] = [
+        0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e, 0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29,
+        0x0b,
+    ];
+    b.raw(&FOOTER_MAGIC1);
+    // Pad with zeros so the offset after the magic is a multiple of 16.
+    while !b.data.len().is_multiple_of(16) {
+        b.raw(&[0]);
+    }
+    // 4 bytes of zero padding, then the version, then 120 zero bytes, then the closing magic.
+    b.raw(&[0u8; 4]);
+    b.u32(7400);
+    b.raw(&[0u8; 120]);
+    b.raw(&FOOTER_MAGIC2);
+}
+
+// ---------------------------------------------------------------------------
+// Binary FBX node/property writer with back-patched end offsets.
+// ---------------------------------------------------------------------------
+
+struct Buf {
+    data: Vec<u8>,
+    /// Count of properties written since the last snapshot; used to fill in a node's
+    /// NumProperties field. Snapshotted and restored around each node's property closure.
+    prop_count: usize,
+}
+
+impl Buf {
+    fn new() -> Self {
+        Buf {
+            data: Vec::new(),
+            prop_count: 0,
         }
     }
-    let uv_index_strs: Vec<String> = uv_index.iter().map(|i| i.to_string()).collect();
-    writeln!(writer, "\t\tLayerElementUV: 0 {{")?;
-    writeln!(writer, "\t\t\tVersion: 101")?;
-    writeln!(writer, "\t\t\tName: \"\"")?;
-    writeln!(writer, "\t\t\tMappingInformationType: \"ByPolygonVertex\"")?;
-    writeln!(writer, "\t\t\tReferenceInformationType: \"IndexToDirect\"")?;
-    writeln!(writer, "\t\t\tUV: *{} {{", uv_floats.len())?;
-    writeln!(writer, "\t\t\t\ta: {}", uv_floats.join(","))?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t\tUVIndex: *{} {{", uv_index_strs.len())?;
-    writeln!(writer, "\t\t\t\ta: {}", uv_index_strs.join(","))?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t}}")?;
+    fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+    fn raw(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+    }
+    fn u32(&mut self, v: u32) {
+        self.data.extend_from_slice(&v.to_le_bytes());
+    }
+    fn patch_u32(&mut self, at: usize, v: u32) {
+        self.data[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
 
-    let material_index_strs: Vec<String> =
-        material_per_polygon.iter().map(|i| i.to_string()).collect();
-    writeln!(writer, "\t\tLayerElementMaterial: 0 {{")?;
-    writeln!(writer, "\t\t\tVersion: 101")?;
-    writeln!(writer, "\t\t\tName: \"\"")?;
-    writeln!(writer, "\t\t\tMappingInformationType: \"ByPolygon\"")?;
-    writeln!(writer, "\t\t\tReferenceInformationType: \"IndexToDirect\"")?;
-    writeln!(writer, "\t\t\tMaterials: *{polygon_count} {{")?;
-    writeln!(writer, "\t\t\t\ta: {}", material_index_strs.join(","))?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t}}")?;
+    // --- properties (each bumps prop_count) ---
+    fn prop_i32(&mut self, v: i32) {
+        self.prop_count += 1;
+        self.data.push(b'I');
+        self.data.extend_from_slice(&v.to_le_bytes());
+    }
+    fn prop_i64(&mut self, v: i64) {
+        self.prop_count += 1;
+        self.data.push(b'L');
+        self.data.extend_from_slice(&v.to_le_bytes());
+    }
+    fn prop_f64(&mut self, v: f64) {
+        self.prop_count += 1;
+        self.data.push(b'D');
+        self.data.extend_from_slice(&v.to_le_bytes());
+    }
+    fn prop_bool(&mut self, v: bool) {
+        self.prop_count += 1;
+        self.data.push(b'C');
+        self.data.push(if v { 1 } else { 0 });
+    }
+    fn prop_str(&mut self, s: &str) {
+        self.prop_count += 1;
+        self.data.push(b'S');
+        self.u32(s.len() as u32);
+        self.data.extend_from_slice(s.as_bytes());
+    }
+    fn prop_raw_bytes(&mut self, bytes: &[u8]) {
+        self.prop_count += 1;
+        self.data.push(b'R');
+        self.u32(bytes.len() as u32);
+        self.data.extend_from_slice(bytes);
+    }
+    /// Object name/class in the binary internal form `name\x00\x01Class`.
+    fn prop_name_class(&mut self, name: &str, class: &str) {
+        self.prop_count += 1;
+        self.data.push(b'S');
+        let len = name.len() + 2 + class.len();
+        self.u32(len as u32);
+        self.data.extend_from_slice(name.as_bytes());
+        self.data.push(0x00);
+        self.data.push(0x01);
+        self.data.extend_from_slice(class.as_bytes());
+    }
+    fn prop_array_f64(&mut self, values: &[f64]) {
+        self.prop_count += 1;
+        self.data.push(b'd');
+        self.u32(values.len() as u32);
+        self.u32(0); // encoding: uncompressed
+        self.u32((values.len() * 8) as u32);
+        for &v in values {
+            self.data.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    fn prop_array_i32(&mut self, values: &[i32]) {
+        self.prop_count += 1;
+        self.data.push(b'i');
+        self.u32(values.len() as u32);
+        self.u32(0); // encoding: uncompressed
+        self.u32((values.len() * 4) as u32);
+        for &v in values {
+            self.data.extend_from_slice(&v.to_le_bytes());
+        }
+    }
 
-    writeln!(writer, "\t\tLayer: 0 {{")?;
-    writeln!(writer, "\t\t\tVersion: 100")?;
-    writeln!(writer, "\t\t\tLayerElement:  {{")?;
-    writeln!(writer, "\t\t\t\tType: \"LayerElementNormal\"")?;
-    writeln!(writer, "\t\t\t\tTypedIndex: 0")?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t\tLayerElement:  {{")?;
-    writeln!(writer, "\t\t\t\tType: \"LayerElementMaterial\"")?;
-    writeln!(writer, "\t\t\t\tTypedIndex: 0")?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t\tLayerElement:  {{")?;
-    writeln!(writer, "\t\t\t\tType: \"LayerElementUV\"")?;
-    writeln!(writer, "\t\t\t\tTypedIndex: 0")?;
-    writeln!(writer, "\t\t\t}}")?;
-    writeln!(writer, "\t\t}}")?;
+    fn null_record(&mut self) {
+        // 13 zero bytes: EndOffset, NumProperties, PropertyListLen, NameLen.
+        self.raw(&[0u8; 13]);
+    }
+}
 
-    writeln!(writer, "\t}}\n")?;
+/// Emits a node: a header with back-patched EndOffset/NumProperties/PropertyListLen, then the
+/// property list (via `props`), then nested child nodes (via `children`). A node with children
+/// gets a trailing 13-byte null record, per the binary FBX spec.
+fn node(
+    b: &mut Buf,
+    name: &str,
+    props: impl FnOnce(&mut Buf),
+    children: impl FnOnce(&mut Buf),
+) {
+    node_result::<_, _, ()>(b, name, props, |b| {
+        children(b);
+        Ok(())
+    })
+    .expect("infallible node")
+}
+
+fn node_result<P, C, E>(b: &mut Buf, name: &str, props: P, children: C) -> std::result::Result<(), E>
+where
+    P: FnOnce(&mut Buf),
+    C: FnOnce(&mut Buf) -> std::result::Result<(), E>,
+{
+    let header_at = b.data.len();
+    b.u32(0); // EndOffset (patched)
+    b.u32(0); // NumProperties (patched)
+    b.u32(0); // PropertyListLen (patched)
+    b.data.push(name.len() as u8);
+    b.data.extend_from_slice(name.as_bytes());
+
+    // Count only the properties written by *this* node's prop closure, not any nested nodes'.
+    let saved_count = b.prop_count;
+    b.prop_count = 0;
+    let props_start = b.data.len();
+    props(b);
+    let num_props = b.prop_count;
+    let prop_list_len = b.data.len() - props_start;
+    b.prop_count = saved_count;
+
+    let has_children_start = b.data.len();
+    children(b)?;
+    let wrote_children = b.data.len() > has_children_start;
+
+    if wrote_children {
+        b.null_record();
+    }
+
+    let end = b.data.len();
+    b.patch_u32(header_at, end as u32);
+    b.patch_u32(header_at + 4, num_props as u32);
+    b.patch_u32(header_at + 8, prop_list_len as u32);
     Ok(())
 }
 
-fn write_material<W: Write>(writer: &mut W, material_id: i64, name: &str) -> Result<()> {
-    writeln!(
-        writer,
-        "\tMaterial: {material_id}, \"Material::{name}\", \"\" {{"
-    )?;
-    writeln!(writer, "\t\tVersion: 102")?;
-    writeln!(writer, "\t\tShadingModel: \"Lambert\"")?;
-    writeln!(writer, "\t\tMultiLayer: 0")?;
-    writeln!(writer, "\t\tProperties70:  {{")?;
-    writeln!(
-        writer,
-        "\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0.8,0.8,0.8"
-    )?;
-    writeln!(writer, "\t\t}}")?;
-    writeln!(writer, "\t}}\n")?;
-    Ok(())
+// --- small helpers for common leaf nodes ---
+
+fn leaf_i32(b: &mut Buf, name: &str, v: i32) {
+    node(b, name, |b| b.prop_i32(v), |_| {});
+}
+fn leaf_str(b: &mut Buf, name: &str, v: &str) {
+    node(b, name, |b| b.prop_str(v), |_| {});
 }
 
-fn format_f32(v: f32) -> String {
-    // FBX ASCII tolerates plain decimal formatting; avoid scientific notation which some
-    // importers mis-parse.
-    format!("{v}")
+fn top_level(b: &mut Buf, name: &str, props: impl FnOnce(&mut Buf)) {
+    node(b, name, props, |_| {});
+}
+
+fn prop70_int(b: &mut Buf, name: &str, v: i32) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str("int");
+            b.prop_str("Integer");
+            b.prop_str("");
+            b.prop_i32(v);
+        },
+        |_| {},
+    );
+}
+fn prop70_double(b: &mut Buf, name: &str, v: f64) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str("double");
+            b.prop_str("Number");
+            b.prop_str("");
+            b.prop_f64(v);
+        },
+        |_| {},
+    );
+}
+fn prop70_lcl(b: &mut Buf, name: &str, x: f64, y: f64, z: f64) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str(name);
+            b.prop_str("");
+            b.prop_str("A");
+            b.prop_f64(x);
+            b.prop_f64(y);
+            b.prop_f64(z);
+        },
+        |_| {},
+    );
+}
+fn prop70_color(b: &mut Buf, name: &str, r: f64, g: f64, bl: f64) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str("Color");
+            b.prop_str("");
+            b.prop_str("A");
+            b.prop_f64(r);
+            b.prop_f64(g);
+            b.prop_f64(bl);
+        },
+        |_| {},
+    );
 }

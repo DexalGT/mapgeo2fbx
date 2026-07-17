@@ -105,9 +105,20 @@ fn converts_minimal_mapgeo_to_fbx() {
         .stdout(contains("\"model_count\": 1"));
 
     let output_path = dir.path().join("test.fbx");
-    assert!(output_path.exists(), "expected test.fbx to be written next to test.mapgeo");
-    let fbx_text = fs::read_to_string(&output_path).expect("read fbx output");
-    assert!(fbx_text.contains("FBXHeaderExtension"));
+    assert!(
+        output_path.exists(),
+        "expected test.fbx to be written next to test.mapgeo"
+    );
+    // Output is binary FBX (Maya drops meshes from huge ASCII arrays), so read bytes not text.
+    let fbx_bytes = fs::read(&output_path).expect("read fbx output");
+    assert!(
+        fbx_bytes.starts_with(b"Kaydara FBX Binary  "),
+        "expected a binary FBX file"
+    );
+    // The FBXHeaderExtension node name appears as a literal byte substring in the node table.
+    assert!(fbx_bytes
+        .windows("FBXHeaderExtension".len())
+        .any(|w| w == b"FBXHeaderExtension"));
 }
 
 #[test]
@@ -126,7 +137,10 @@ fn info_only_does_not_write_fbx() {
         .success();
 
     let output_path = dir.path().join("test.fbx");
-    assert!(!output_path.exists(), "--info-only must not write an fbx file");
+    assert!(
+        !output_path.exists(),
+        "--info-only must not write an fbx file"
+    );
 }
 
 #[test]
