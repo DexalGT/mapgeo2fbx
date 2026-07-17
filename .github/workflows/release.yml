@@ -1,0 +1,37 @@
+name: release
+
+# Build the Windows binary and publish a GitHub release when a version tag is pushed.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p mapgeo2fbx-cli
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Copy-Item target/release/mapgeo2fbx.exe "mapgeo2fbx-$tag-windows-x64.exe"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mapgeo2fbx-*-windows-x64.exe
+          generate_release_notes: true
