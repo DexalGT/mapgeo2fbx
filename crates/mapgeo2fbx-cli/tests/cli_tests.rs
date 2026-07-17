@@ -109,16 +109,9 @@ fn converts_minimal_mapgeo_to_fbx() {
         output_path.exists(),
         "expected test.fbx to be written next to test.mapgeo"
     );
-    // Output is binary FBX (Maya drops meshes from huge ASCII arrays), so read bytes not text.
-    let fbx_bytes = fs::read(&output_path).expect("read fbx output");
-    assert!(
-        fbx_bytes.starts_with(b"Kaydara FBX Binary  "),
-        "expected a binary FBX file"
-    );
-    // The FBXHeaderExtension node name appears as a literal byte substring in the node table.
-    assert!(fbx_bytes
-        .windows("FBXHeaderExtension".len())
-        .any(|w| w == b"FBXHeaderExtension"));
+    let fbx_text = fs::read_to_string(&output_path).expect("read fbx output");
+    assert!(fbx_text.contains("FBXHeaderExtension"));
+    assert!(fbx_text.contains(r#"P: "DefaultAttributeIndex", "int", "Integer", "",0"#));
 }
 
 #[test]

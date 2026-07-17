@@ -36,11 +36,10 @@ fn converts_real_sample_file() {
 
     let mut buf = Vec::new();
     write_fbx(&mut buf, &meshes).expect("write real mapgeo file to fbx");
-
-    // Output is binary FBX; assert the magic and that the key node names appear as byte substrings.
-    assert!(buf.starts_with(b"Kaydara FBX Binary  "));
-    let contains = |needle: &[u8]| buf.windows(needle.len()).any(|w| w == needle);
-    assert!(contains(b"FBXHeaderExtension"));
-    assert!(contains(b"Objects"));
-    assert!(contains(b"Connections"));
+    let text = String::from_utf8(buf).expect("fbx output must be valid utf8");
+    assert!(text.contains("FBXHeaderExtension"));
+    assert!(text.contains("Objects:"));
+    assert!(text.contains("Connections:"));
+    // Every Model must carry DefaultAttributeIndex or Maya drops the mesh.
+    assert!(text.contains(r#"P: "DefaultAttributeIndex", "int", "Integer", "",0"#));
 }

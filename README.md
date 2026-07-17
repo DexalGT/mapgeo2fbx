@@ -1,6 +1,6 @@
 # mapgeo2fbx
 
-Converts League of Legends `.mapgeo` map geometry files to binary `.fbx` for viewing/editing in
+Converts League of Legends `.mapgeo` map geometry files to `.fbx` for viewing/editing in
 Maya, Blender, 3ds Max, and similar tools.
 
 ## Usage
@@ -29,7 +29,7 @@ Run `mapgeo2fbx --help` for the full flag list.
   extracted or embedded, since `.mapgeo` only stores texture *paths*, not texture data.
 - Static geometry only — `.mapgeo` has no skeleton/animation data (that's a different format
   used by character skins).
-- Binary FBX 7.4 output (the format Maya's own exporter uses; imports cleanly into Maya).
+- ASCII FBX 7.4 output (verified to import into Maya 2023 with all meshes visible).
 - Currently decodes Position/Normal/UV0 channels stored as 32-bit floats (`XyzFloat32`/
   `XyFloat32`). Some real `.mapgeo` files use packed integer vertex formats for these channels,
   which aren't decoded yet — such files will fail with an `UnsupportedVertexFormat` error rather
