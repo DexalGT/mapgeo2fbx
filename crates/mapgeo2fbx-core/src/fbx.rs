@@ -4,9 +4,23 @@ use std::io::Write;
 use crate::decode::DecodedMesh;
 use crate::error::{Error, Result};
 
-/// Writes an ASCII FBX 7.4 scene containing one Model+Geometry pair per input mesh, with
-/// per-submesh material assignment via a `ByPolygon`/`IndexToDirect` `LayerElementMaterial`.
+/// Per-mesh object ids. A mesh needs three FBX objects: the Model (transform node), the
+/// NodeAttribute that tells Maya the node is a mesh, and the Geometry that holds the vertices.
+struct MeshIds {
+    model_id: i64,
+    node_attribute_id: i64,
+    geometry_id: i64,
+}
+
+/// Writes an ASCII FBX 7.4 scene containing one Model + NodeAttribute + Geometry per input mesh,
+/// with per-submesh material assignment via a `ByPolygon`/`IndexToDirect` `LayerElementMaterial`.
 /// Material nodes are deduplicated by name across the whole scene.
+///
+/// The output targets Autodesk Maya's importer, which is much stricter than Blender's: names use
+/// the ASCII `Class::name` form (never the raw `\x00\x01` binary separator), every mesh carries a
+/// `NodeAttribute` of subclass `"Mesh"` so Maya binds the geometry to its transform instead of
+/// leaving an empty node, and the header/`Definitions` declare `GlobalSettings` with an accurate
+/// object count.
 pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()> {
     let mut next_id: i64 = 1_000_000;
     let mut alloc_id = move || {
@@ -15,13 +29,18 @@ pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()>
         id
     };
 
-    // Assign Model/Geometry ids per mesh first, then material ids, so ids stay stable and
-    // low-numbered ids land on the Model/Geometry pairs before any Material.
-    let mut model_geometry_ids = Vec::with_capacity(meshes.len());
+    // Assign Model/NodeAttribute/Geometry ids per mesh first, then material ids, so ids stay
+    // stable and low-numbered ids land on the per-mesh objects before any Material.
+    let mut mesh_ids = Vec::with_capacity(meshes.len());
     for _mesh in meshes {
         let model_id = alloc_id();
+        let node_attribute_id = alloc_id();
         let geometry_id = alloc_id();
-        model_geometry_ids.push((model_id, geometry_id));
+        mesh_ids.push(MeshIds {
+            model_id,
+            node_attribute_id,
+            geometry_id,
+        });
     }
 
     // Assign a stable object id to every unique material name across all meshes, so
@@ -42,9 +61,10 @@ pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()>
     write_definitions(writer, meshes.len(), material_ids.len())?;
 
     writeln!(writer, "Objects:  {{")?;
-    for (mesh, (model_id, geometry_id)) in meshes.iter().zip(&model_geometry_ids) {
-        write_model(writer, *model_id, &mesh.name)?;
-        write_geometry(writer, *geometry_id, mesh, &material_ids)?;
+    for (mesh, ids) in meshes.iter().zip(&mesh_ids) {
+        write_model(writer, ids.model_id, &mesh.name)?;
+        write_node_attribute(writer, ids.node_attribute_id)?;
+        write_geometry(writer, ids.geometry_id, mesh, &material_ids)?;
     }
     let mut sorted_materials: Vec<(&String, &i64)> = material_ids.iter().collect();
     sorted_materials.sort_by_key(|(_, id)| **id);
@@ -54,14 +74,19 @@ pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()>
     writeln!(writer, "}}\n")?;
 
     writeln!(writer, "Connections:  {{")?;
-    for (mesh, (model_id, geometry_id)) in meshes.iter().zip(&model_geometry_ids) {
-        writeln!(writer, "\tC: \"OO\",{geometry_id},{model_id}")?;
-        writeln!(writer, "\tC: \"OO\",{model_id},0")?;
+    for (mesh, ids) in meshes.iter().zip(&mesh_ids) {
+        writeln!(writer, "\tC: \"OO\",{},{}", ids.geometry_id, ids.model_id)?;
+        writeln!(
+            writer,
+            "\tC: \"OO\",{},{}",
+            ids.node_attribute_id, ids.model_id
+        )?;
+        writeln!(writer, "\tC: \"OO\",{},0", ids.model_id)?;
         let mut seen = std::collections::HashSet::new();
         for submesh in &mesh.submeshes {
             if seen.insert(&submesh.name) {
                 let material_id = material_ids[&submesh.name];
-                writeln!(writer, "\tC: \"OO\",{material_id},{model_id}")?;
+                writeln!(writer, "\tC: \"OO\",{material_id},{}", ids.model_id)?;
             }
         }
     }
@@ -71,12 +96,43 @@ pub fn write_fbx<W: Write>(writer: &mut W, meshes: &[DecodedMesh]) -> Result<()>
 }
 
 fn write_header<W: Write>(writer: &mut W) -> Result<()> {
+    // Maya's importer validates a complete FBXHeaderExtension: a CreationTimeStamp block and a
+    // SceneInfo, plus a top-level CreationTime/Creator, exactly as the FBX SDK emits. The
+    // timestamp is fixed (not the wall clock) so output is deterministic and reproducible.
     writeln!(writer, "; FBX 7.4.0 project file")?;
     writeln!(writer, "FBXHeaderExtension:  {{")?;
     writeln!(writer, "\tFBXHeaderVersion: 1003")?;
     writeln!(writer, "\tFBXVersion: 7400")?;
+    writeln!(writer, "\tCreationTimeStamp:  {{")?;
+    writeln!(writer, "\t\tVersion: 1000")?;
+    writeln!(writer, "\t\tYear: 1970")?;
+    writeln!(writer, "\t\tMonth: 1")?;
+    writeln!(writer, "\t\tDay: 1")?;
+    writeln!(writer, "\t\tHour: 0")?;
+    writeln!(writer, "\t\tMinute: 0")?;
+    writeln!(writer, "\t\tSecond: 0")?;
+    writeln!(writer, "\t\tMillisecond: 0")?;
+    writeln!(writer, "\t}}")?;
     writeln!(writer, "\tCreator: \"mapgeo2fbx\"")?;
+    writeln!(
+        writer,
+        "\tSceneInfo: \"SceneInfo::GlobalInfo\", \"UserData\" {{"
+    )?;
+    writeln!(writer, "\t\tType: \"UserData\"")?;
+    writeln!(writer, "\t\tVersion: 100")?;
+    writeln!(writer, "\t\tMetaData:  {{")?;
+    writeln!(writer, "\t\t\tVersion: 100")?;
+    writeln!(writer, "\t\t\tTitle: \"\"")?;
+    writeln!(writer, "\t\t\tSubject: \"\"")?;
+    writeln!(writer, "\t\t\tAuthor: \"\"")?;
+    writeln!(writer, "\t\t\tKeywords: \"\"")?;
+    writeln!(writer, "\t\t\tRevision: \"\"")?;
+    writeln!(writer, "\t\t\tComment: \"\"")?;
+    writeln!(writer, "\t\t}}")?;
+    writeln!(writer, "\t}}")?;
     writeln!(writer, "}}\n")?;
+    writeln!(writer, "CreationTime: \"1970-01-01 00:00:00:000\"")?;
+    writeln!(writer, "Creator: \"mapgeo2fbx\"\n")?;
     Ok(())
 }
 
@@ -85,12 +141,24 @@ fn write_global_settings<W: Write>(writer: &mut W) -> Result<()> {
     writeln!(writer, "\tVersion: 1000")?;
     writeln!(writer, "\tProperties70:  {{")?;
     writeln!(writer, "\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",1")?;
-    writeln!(writer, "\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1")?;
+    writeln!(
+        writer,
+        "\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1"
+    )?;
     writeln!(writer, "\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",2")?;
-    writeln!(writer, "\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1")?;
+    writeln!(
+        writer,
+        "\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1"
+    )?;
     writeln!(writer, "\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0")?;
-    writeln!(writer, "\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1")?;
-    writeln!(writer, "\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1")?;
+    writeln!(
+        writer,
+        "\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1"
+    )?;
+    writeln!(
+        writer,
+        "\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1"
+    )?;
     writeln!(writer, "\t}}")?;
     writeln!(writer, "}}\n")?;
     Ok(())
@@ -102,7 +170,10 @@ fn write_documents<W: Write>(writer: &mut W) -> Result<()> {
     writeln!(writer, "\tDocument: 1000000000, \"\", \"Scene\" {{")?;
     writeln!(writer, "\t\tProperties70:  {{")?;
     writeln!(writer, "\t\t\tP: \"SourceObject\", \"object\", \"\", \"\"")?;
-    writeln!(writer, "\t\t\tP: \"ActiveAnimStackName\", \"KString\", \"\", \"\", \"\"")?;
+    writeln!(
+        writer,
+        "\t\t\tP: \"ActiveAnimStackName\", \"KString\", \"\", \"\", \"\""
+    )?;
     writeln!(writer, "\t\t}}")?;
     writeln!(writer, "\t\tRootNode: 0")?;
     writeln!(writer, "\t}}")?;
@@ -110,11 +181,25 @@ fn write_documents<W: Write>(writer: &mut W) -> Result<()> {
     Ok(())
 }
 
-fn write_definitions<W: Write>(writer: &mut W, model_count: usize, material_count: usize) -> Result<()> {
+fn write_definitions<W: Write>(
+    writer: &mut W,
+    model_count: usize,
+    material_count: usize,
+) -> Result<()> {
+    // Each mesh contributes a Model, a NodeAttribute, and a Geometry; plus one GlobalSettings for
+    // the whole scene. Maya's importer expects GlobalSettings to be declared here (Blender does
+    // not care) and the total Count to cover every declared object type.
+    let total = 1 + model_count * 3 + material_count;
     writeln!(writer, "Definitions:  {{")?;
     writeln!(writer, "\tVersion: 100")?;
-    writeln!(writer, "\tCount: {}", model_count * 2 + material_count)?;
+    writeln!(writer, "\tCount: {total}")?;
+    writeln!(writer, "\tObjectType: \"GlobalSettings\" {{")?;
+    writeln!(writer, "\t\tCount: 1")?;
+    writeln!(writer, "\t}}")?;
     writeln!(writer, "\tObjectType: \"Model\" {{")?;
+    writeln!(writer, "\t\tCount: {model_count}")?;
+    writeln!(writer, "\t}}")?;
+    writeln!(writer, "\tObjectType: \"NodeAttribute\" {{")?;
     writeln!(writer, "\t\tCount: {model_count}")?;
     writeln!(writer, "\t}}")?;
     writeln!(writer, "\tObjectType: \"Geometry\" {{")?;
@@ -128,15 +213,48 @@ fn write_definitions<W: Write>(writer: &mut W, model_count: usize, material_coun
 }
 
 fn write_model<W: Write>(writer: &mut W, model_id: i64, name: &str) -> Result<()> {
-    writeln!(writer, "\tModel: {model_id}, \"Model::{name}\", \"Mesh\" {{")?;
+    // ASCII FBX object declarations name the object as "Class::name" — a plain UTF-8 string with a
+    // literal double colon, class word first. The raw \x00\x01 (NUL+SOH) separator is the *binary*
+    // FBX internal form; writing those control bytes into an ASCII file makes Maya's strict SDK
+    // parser fail to resolve the object, so the mesh never binds and the outliner shows an empty
+    // node. Blender tolerates both forms, which is why the bug only surfaces in Maya.
+    writeln!(
+        writer,
+        "\tModel: {model_id}, \"Model::{name}\", \"Mesh\" {{"
+    )?;
     writeln!(writer, "\t\tVersion: 232")?;
     writeln!(writer, "\t\tProperties70:  {{")?;
-    writeln!(writer, "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0")?;
-    writeln!(writer, "\t\t\tP: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\",0,0,0")?;
-    writeln!(writer, "\t\t\tP: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",1,1,1")?;
+    writeln!(
+        writer,
+        "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0"
+    )?;
+    writeln!(
+        writer,
+        "\t\t\tP: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\",0,0,0"
+    )?;
+    writeln!(
+        writer,
+        "\t\t\tP: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",1,1,1"
+    )?;
     writeln!(writer, "\t\t}}")?;
     writeln!(writer, "\t\tShading: T")?;
     writeln!(writer, "\t\tCulling: \"CullingOff\"")?;
+    writeln!(writer, "\t}}\n")?;
+    Ok(())
+}
+
+fn write_node_attribute<W: Write>(writer: &mut W, node_attribute_id: i64) -> Result<()> {
+    // Maya decides a transform node is a mesh from a connected NodeAttribute of subclass "Mesh"
+    // (FbxNodeAttribute::eMesh), not from the Geometry connection alone. Without it Maya imports
+    // the Model as a bare transform and drops the geometry, leaving an empty node in the outliner.
+    // The attribute carries no data of its own; the Geometry holds the vertices.
+    writeln!(
+        writer,
+        "\tNodeAttribute: {node_attribute_id}, \"NodeAttribute::\", \"Mesh\" {{"
+    )?;
+    writeln!(writer, "\t\tProperties70:  {{")?;
+    writeln!(writer, "\t\t}}")?;
+    writeln!(writer, "\t\tTypeFlags: \"Null\"")?;
     writeln!(writer, "\t}}\n")?;
     Ok(())
 }
@@ -191,7 +309,11 @@ fn write_geometry<W: Write>(
     writeln!(writer, "\t\t}}")?;
 
     let index_strs: Vec<String> = polygon_vertex_index.iter().map(|i| i.to_string()).collect();
-    writeln!(writer, "\t\tPolygonVertexIndex: *{} {{", polygon_vertex_index.len())?;
+    writeln!(
+        writer,
+        "\t\tPolygonVertexIndex: *{} {{",
+        polygon_vertex_index.len()
+    )?;
     writeln!(writer, "\t\t\ta: {}", index_strs.join(","))?;
     writeln!(writer, "\t\t}}")?;
     writeln!(writer, "\t\tGeometryVersion: 124")?;
@@ -203,11 +325,14 @@ fn write_geometry<W: Write>(
     for submesh in &mesh.submeshes {
         for tri in &submesh.triangle_indices {
             for &vi in tri {
-                let v = mesh.vertices.get(vi as usize).ok_or_else(|| Error::VertexIndexOutOfRange {
-                    mesh: mesh.name.clone(),
-                    index: vi,
-                    vertex_count: mesh.vertices.len(),
-                })?;
+                let v =
+                    mesh.vertices
+                        .get(vi as usize)
+                        .ok_or_else(|| Error::VertexIndexOutOfRange {
+                            mesh: mesh.name.clone(),
+                            index: vi,
+                            vertex_count: mesh.vertices.len(),
+                        })?;
                 normal_floats.push(format_f32(v.normal.x));
                 normal_floats.push(format_f32(v.normal.y));
                 normal_floats.push(format_f32(v.normal.z));
@@ -251,7 +376,8 @@ fn write_geometry<W: Write>(
     writeln!(writer, "\t\t\t}}")?;
     writeln!(writer, "\t\t}}")?;
 
-    let material_index_strs: Vec<String> = material_per_polygon.iter().map(|i| i.to_string()).collect();
+    let material_index_strs: Vec<String> =
+        material_per_polygon.iter().map(|i| i.to_string()).collect();
     writeln!(writer, "\t\tLayerElementMaterial: 0 {{")?;
     writeln!(writer, "\t\t\tVersion: 101")?;
     writeln!(writer, "\t\t\tName: \"\"")?;
@@ -283,12 +409,18 @@ fn write_geometry<W: Write>(
 }
 
 fn write_material<W: Write>(writer: &mut W, material_id: i64, name: &str) -> Result<()> {
-    writeln!(writer, "\tMaterial: {material_id}, \"Material::{name}\", \"\" {{")?;
+    writeln!(
+        writer,
+        "\tMaterial: {material_id}, \"Material::{name}\", \"\" {{"
+    )?;
     writeln!(writer, "\t\tVersion: 102")?;
     writeln!(writer, "\t\tShadingModel: \"Lambert\"")?;
     writeln!(writer, "\t\tMultiLayer: 0")?;
     writeln!(writer, "\t\tProperties70:  {{")?;
-    writeln!(writer, "\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0.8,0.8,0.8")?;
+    writeln!(
+        writer,
+        "\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0.8,0.8,0.8"
+    )?;
     writeln!(writer, "\t\t}}")?;
     writeln!(writer, "\t}}\n")?;
     Ok(())

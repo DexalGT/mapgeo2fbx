@@ -39,16 +39,35 @@ fn writes_expected_ascii_for_single_triangle() {
 
     assert!(text.contains(r#"FBXHeaderExtension:  {"#));
     assert!(text.contains(r#"Creator: "mapgeo2fbx""#));
-    assert!(text.contains(r#"Model: 1000000, "Model::MapGeo_Instance_0", "Mesh""#));
-    assert!(text.contains(r#"Geometry: 1000001, "Geometry::MapGeo_Instance_0", "Mesh""#));
+    // ASCII FBX object names use the literal "Class::name" form (class word, "::", user name).
+    // The raw \x00\x01 separator is the *binary* FBX internal encoding; writing those control
+    // bytes into an ASCII file makes Maya's strict SDK parser fail to resolve the object, so the
+    // mesh never binds to its transform (it shows an empty node). Blender tolerates either form.
+    assert!(text.contains("Model: 1000000, \"Model::MapGeo_Instance_0\", \"Mesh\""));
+    assert!(text.contains("Geometry: 1000002, \"Geometry::MapGeo_Instance_0\", \"Mesh\""));
+    // No raw NUL/SOH separator bytes may appear anywhere in an ASCII FBX.
+    assert!(!text.contains('\u{0}'));
+    assert!(!text.contains('\u{1}'));
     assert!(text.contains("Vertices: *9 {"));
     assert!(text.contains("a: 0,0,0,1,0,0,1,1,0"));
     assert!(text.contains("PolygonVertexIndex: *3 {"));
     assert!(text.contains("a: 0,1,-3"));
-    assert!(text.contains(r#"Material: 1000002, "Material::Materials/Grass", """#));
+    assert!(text.contains("Material: 1000003, \"Material::Materials/Grass\", \"\""));
+
+    // Maya binds geometry to a transform via a mesh NodeAttribute, not the Geometry connection
+    // alone. Each model gets its own NodeAttribute (subclass "Mesh") connected to it.
+    assert!(text.contains("NodeAttribute: 1000001, \"NodeAttribute::\", \"Mesh\""));
+
+    // Geometry -> Model, NodeAttribute -> Model, Model -> root, Material -> Model.
+    assert!(text.contains(r#"C: "OO",1000002,1000000"#));
     assert!(text.contains(r#"C: "OO",1000001,1000000"#));
     assert!(text.contains(r#"C: "OO",1000000,0"#));
-    assert!(text.contains(r#"C: "OO",1000002,1000000"#));
+    assert!(text.contains(r#"C: "OO",1000003,1000000"#));
+
+    // Maya validates a complete header and Definitions; GlobalSettings must be declared and present.
+    assert!(text.contains("CreationTimeStamp:  {"));
+    assert!(text.contains(r#"ObjectType: "GlobalSettings" {"#));
+    assert!(text.contains(r#"ObjectType: "NodeAttribute" {"#));
 }
 
 #[test]
