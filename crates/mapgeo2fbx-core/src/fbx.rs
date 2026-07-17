@@ -78,6 +78,10 @@ fn write_document(
     write_definitions(b, meshes.len(), material_ids.len());
     write_objects(b, meshes, model_geometry_ids, material_ids)?;
     write_connections(b, meshes, model_geometry_ids, material_ids);
+    // An empty Takes block (no animation), matching an FBX SDK export.
+    node(b, "Takes", |_| {}, |b| {
+        node(b, "Current", |b| b.prop_str(""), |_| {});
+    });
 
     // A top-level null record closes the node list, then the footer.
     b.null_record();
@@ -104,18 +108,48 @@ fn write_header_extension(b: &mut Buf) {
 }
 
 fn write_global_settings(b: &mut Buf) {
+    // Full GlobalSettings property set, matching an FBX SDK / Maya export. Y-up, cm scale.
     node(b, "GlobalSettings", |_| {}, |b| {
         leaf_i32(b, "Version", 1000);
         node(b, "Properties70", |_| {}, |b| {
-            prop70_int(b, "UpAxis", 1);
-            prop70_int(b, "UpAxisSign", 1);
-            prop70_int(b, "FrontAxis", 2);
-            prop70_int(b, "FrontAxisSign", 1);
-            prop70_int(b, "CoordAxis", 0);
-            prop70_int(b, "CoordAxisSign", 1);
-            prop70_double(b, "UnitScaleFactor", 1.0);
+            prop70_i(b, "UpAxis", "int", "Integer", "", 1);
+            prop70_i(b, "UpAxisSign", "int", "Integer", "", 1);
+            prop70_i(b, "FrontAxis", "int", "Integer", "", 2);
+            prop70_i(b, "FrontAxisSign", "int", "Integer", "", 1);
+            prop70_i(b, "CoordAxis", "int", "Integer", "", 0);
+            prop70_i(b, "CoordAxisSign", "int", "Integer", "", 1);
+            prop70_i(b, "OriginalUpAxis", "int", "Integer", "", 1);
+            prop70_i(b, "OriginalUpAxisSign", "int", "Integer", "", 1);
+            prop70(b, "UnitScaleFactor", "double", "Number", "", &[1.0]);
+            prop70(b, "OriginalUnitScaleFactor", "double", "Number", "", &[1.0]);
+            prop70(b, "AmbientColor", "ColorRGB", "Color", "", &[0.0, 0.0, 0.0]);
+            prop70_s(b, "DefaultCamera", "KString", "", "", "Producer Perspective");
+            prop70_i(b, "TimeMode", "enum", "", "", 11);
+            prop70_i(b, "TimeProtocol", "enum", "", "", 2);
+            prop70_i(b, "SnapOnFrameMode", "enum", "", "", 0);
+            prop70_time(b, "TimeSpanStart", 0);
+            prop70_time(b, "TimeSpanStop", 46186158000);
+            prop70(b, "CustomFrameRate", "double", "Number", "", &[-1.0]);
+            prop70_empty(b, "TimeMarker", "Compound", "", "");
+            prop70_i(b, "CurrentTimeMarker", "int", "Integer", "", -1);
         });
     });
+}
+
+// A Properties70 KTime entry: the value is a 64-bit integer tagged type 'L'.
+fn prop70_time(b: &mut Buf, name: &str, v: i64) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str("KTime");
+            b.prop_str("Time");
+            b.prop_str("");
+            b.prop_i64(v);
+        },
+        |_| {},
+    );
 }
 
 fn write_documents(b: &mut Buf) {
@@ -126,10 +160,14 @@ fn write_documents(b: &mut Buf) {
             "Document",
             |b| {
                 b.prop_i64(1_000_000_000);
-                b.prop_str("Scene");
+                b.prop_str(""); // Maya leaves the document's name field empty.
                 b.prop_str("Scene");
             },
             |b| {
+                node(b, "Properties70", |_| {}, |b| {
+                    prop70_empty(b, "SourceObject", "object", "", "");
+                    prop70_s(b, "ActiveAnimStackName", "KString", "", "", "Take 001");
+                });
                 node(b, "RootNode", |b| b.prop_i64(0), |_| {});
             },
         );
@@ -142,17 +180,76 @@ fn write_definitions(b: &mut Buf, model_count: usize, material_count: usize) {
     node(b, "Definitions", |_| {}, |b| {
         leaf_i32(b, "Version", 100);
         leaf_i32(b, "Count", total as i32);
-        object_type(b, "GlobalSettings", 1);
-        object_type(b, "Model", model_count as i32);
-        object_type(b, "Geometry", model_count as i32);
-        object_type(b, "Material", material_count as i32);
+        object_type(b, "GlobalSettings", 1, |_| {});
+        object_type(b, "Model", model_count as i32, |b| {
+            property_template(b, "FbxNode", model_template);
+        });
+        object_type(b, "Geometry", model_count as i32, |b| {
+            property_template(b, "FbxMesh", mesh_template);
+        });
+        object_type(b, "Material", material_count as i32, |b| {
+            property_template(b, "FbxSurfaceLambert", material_template);
+        });
     });
 }
 
-fn object_type(b: &mut Buf, name: &str, count: i32) {
+fn object_type(b: &mut Buf, name: &str, count: i32, extra: impl FnOnce(&mut Buf)) {
     node(b, "ObjectType", |b| b.prop_str(name), |b| {
         leaf_i32(b, "Count", count);
+        extra(b);
     });
+}
+
+fn property_template(b: &mut Buf, class: &str, props: impl FnOnce(&mut Buf)) {
+    node(b, "PropertyTemplate", |b| b.prop_str(class), |b| {
+        node(b, "Properties70", |_| {}, props);
+    });
+}
+
+// FbxNode (Model) default properties Maya writes. The transform/visibility defaults are the ones
+// importers read; the long tail of limit/damping fields is included to match the SDK template.
+fn model_template(b: &mut Buf) {
+    prop70(b, "RotationOffset", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "RotationPivot", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "ScalingOffset", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "ScalingPivot", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70_i(b, "RotationOrder", "enum", "", "", 0);
+    prop70(b, "PreRotation", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "PostRotation", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70_i(b, "InheritType", "enum", "", "", 0);
+    prop70(b, "GeometricTranslation", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "GeometricRotation", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "GeometricScaling", "Vector3D", "Vector", "", &[1.0, 1.0, 1.0]);
+    prop70_i(b, "DefaultAttributeIndex", "int", "Integer", "", -1);
+    prop70(b, "Lcl Translation", "Lcl Translation", "", "A", &[0.0, 0.0, 0.0]);
+    prop70(b, "Lcl Rotation", "Lcl Rotation", "", "A", &[0.0, 0.0, 0.0]);
+    prop70(b, "Lcl Scaling", "Lcl Scaling", "", "A", &[1.0, 1.0, 1.0]);
+    prop70(b, "Visibility", "Visibility", "", "A", &[1.0]);
+    prop70_i(b, "Visibility Inheritance", "Visibility Inheritance", "", "", 1);
+}
+
+// FbxMesh (Geometry) default properties.
+fn mesh_template(b: &mut Buf) {
+    prop70(b, "Color", "ColorRGB", "Color", "", &[0.8, 0.8, 0.8]);
+    prop70(b, "BBoxMin", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70(b, "BBoxMax", "Vector3D", "Vector", "", &[0.0, 0.0, 0.0]);
+    prop70_i(b, "Primary Visibility", "bool", "", "", 1);
+    prop70_i(b, "Casts Shadows", "bool", "", "", 1);
+    prop70_i(b, "Receive Shadows", "bool", "", "", 1);
+}
+
+// FbxSurfaceLambert (Material) default properties.
+fn material_template(b: &mut Buf) {
+    prop70_s(b, "ShadingModel", "KString", "", "", "Lambert");
+    prop70_i(b, "MultiLayer", "bool", "", "", 0);
+    prop70(b, "EmissiveColor", "Color", "", "A", &[0.0, 0.0, 0.0]);
+    prop70(b, "EmissiveFactor", "Number", "", "A", &[1.0]);
+    prop70(b, "AmbientColor", "Color", "", "A", &[0.2, 0.2, 0.2]);
+    prop70(b, "AmbientFactor", "Number", "", "A", &[1.0]);
+    prop70(b, "DiffuseColor", "Color", "", "A", &[0.8, 0.8, 0.8]);
+    prop70(b, "DiffuseFactor", "Number", "", "A", &[1.0]);
+    prop70(b, "TransparentColor", "Color", "", "A", &[0.0, 0.0, 0.0]);
+    prop70(b, "TransparencyFactor", "Number", "", "A", &[0.0]);
 }
 
 fn write_objects(
@@ -196,10 +293,13 @@ fn write_model(b: &mut Buf, model_id: i64, name: &str) {
         |b| {
             leaf_i32(b, "Version", 232);
             node(b, "Properties70", |_| {}, |b| {
-                // World transform is baked into the vertices, so the node stays at identity.
-                prop70_lcl(b, "Lcl Translation", 0.0, 0.0, 0.0);
-                prop70_lcl(b, "Lcl Rotation", 0.0, 0.0, 0.0);
-                prop70_lcl(b, "Lcl Scaling", 1.0, 1.0, 1.0);
+                // DefaultAttributeIndex 0 tells Maya to use the node's first (only) attribute —
+                // here, the mesh Geometry connected below. World transform is baked into the
+                // vertices, so the local transform stays at identity.
+                prop70_i(b, "DefaultAttributeIndex", "int", "Integer", "", 0);
+                prop70(b, "Lcl Translation", "Lcl Translation", "", "A", &[0.0, 0.0, 0.0]);
+                prop70(b, "Lcl Rotation", "Lcl Rotation", "", "A", &[0.0, 0.0, 0.0]);
+                prop70(b, "Lcl Scaling", "Lcl Scaling", "", "A", &[1.0, 1.0, 1.0]);
             });
             node(b, "Shading", |b| b.prop_bool(true), |_| {});
             node(b, "Culling", |b| b.prop_str("CullingOff"), |_| {});
@@ -418,12 +518,13 @@ fn write_footer(b: &mut Buf) {
         0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e, 0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29,
         0x0b,
     ];
+    // Magic #1 immediately after the closing null record — no gap.
     b.raw(&FOOTER_MAGIC1);
-    // Pad with zeros so the offset after the magic is a multiple of 16.
-    while !b.data.len().is_multiple_of(16) {
-        b.raw(&[0]);
-    }
-    // 4 bytes of zero padding, then the version, then 120 zero bytes, then the closing magic.
+    // Alignment padding: 1..=16 zero bytes (never 0), computed from the current file offset, per
+    // the FBX SDK / assimp footer layout.
+    let pad = 16 - (b.data.len() % 16);
+    b.raw(&vec![0u8; pad]);
+    // 4 fixed zero bytes, the version (LE), 120 fixed zero bytes, then the closing magic.
     b.raw(&[0u8; 4]);
     b.u32(7400);
     b.raw(&[0u8; 120]);
@@ -597,50 +698,6 @@ fn top_level(b: &mut Buf, name: &str, props: impl FnOnce(&mut Buf)) {
     node(b, name, props, |_| {});
 }
 
-fn prop70_int(b: &mut Buf, name: &str, v: i32) {
-    node(
-        b,
-        "P",
-        |b| {
-            b.prop_str(name);
-            b.prop_str("int");
-            b.prop_str("Integer");
-            b.prop_str("");
-            b.prop_i32(v);
-        },
-        |_| {},
-    );
-}
-fn prop70_double(b: &mut Buf, name: &str, v: f64) {
-    node(
-        b,
-        "P",
-        |b| {
-            b.prop_str(name);
-            b.prop_str("double");
-            b.prop_str("Number");
-            b.prop_str("");
-            b.prop_f64(v);
-        },
-        |_| {},
-    );
-}
-fn prop70_lcl(b: &mut Buf, name: &str, x: f64, y: f64, z: f64) {
-    node(
-        b,
-        "P",
-        |b| {
-            b.prop_str(name);
-            b.prop_str(name);
-            b.prop_str("");
-            b.prop_str("A");
-            b.prop_f64(x);
-            b.prop_f64(y);
-            b.prop_f64(z);
-        },
-        |_| {},
-    );
-}
 fn prop70_color(b: &mut Buf, name: &str, r: f64, g: f64, bl: f64) {
     node(
         b,
@@ -653,6 +710,72 @@ fn prop70_color(b: &mut Buf, name: &str, r: f64, g: f64, bl: f64) {
             b.prop_f64(r);
             b.prop_f64(g);
             b.prop_f64(bl);
+        },
+        |_| {},
+    );
+}
+
+// General Properties70 entry: name, type, subtype, flags, then zero or more f64 values. Mirrors
+// the FBX SDK `P:` record used throughout Definitions PropertyTemplates and object properties.
+fn prop70(b: &mut Buf, name: &str, ty: &str, sub: &str, flags: &str, values: &[f64]) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str(ty);
+            b.prop_str(sub);
+            b.prop_str(flags);
+            for &v in values {
+                b.prop_f64(v);
+            }
+        },
+        |_| {},
+    );
+}
+
+// Properties70 entry whose value is an integer (enum/int/bool templates use this).
+fn prop70_i(b: &mut Buf, name: &str, ty: &str, sub: &str, flags: &str, v: i32) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str(ty);
+            b.prop_str(sub);
+            b.prop_str(flags);
+            b.prop_i32(v);
+        },
+        |_| {},
+    );
+}
+
+// Properties70 entry whose value is a string.
+fn prop70_s(b: &mut Buf, name: &str, ty: &str, sub: &str, flags: &str, v: &str) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str(ty);
+            b.prop_str(sub);
+            b.prop_str(flags);
+            b.prop_str(v);
+        },
+        |_| {},
+    );
+}
+
+// Properties70 entry with no value payload (e.g. `object` references, `Compound`).
+fn prop70_empty(b: &mut Buf, name: &str, ty: &str, sub: &str, flags: &str) {
+    node(
+        b,
+        "P",
+        |b| {
+            b.prop_str(name);
+            b.prop_str(ty);
+            b.prop_str(sub);
+            b.prop_str(flags);
         },
         |_| {},
     );
